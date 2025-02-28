@@ -3,7 +3,9 @@ from typing import Optional, TYPE_CHECKING
 from datetime import datetime
 import numpy as np
 import asyncio
-import simpleaudio
+from pydub import AudioSegment
+from pydub.playback import play
+import io
 import time
 import wave
 
@@ -238,7 +240,7 @@ class Microphone:
         
         return audio_data
     
-    def play_audio_background(self, audio_data: np.ndarray, sample_rate: Optional[int] = None, bit_depth: Optional[int] = None) -> simpleaudio.PlayObject:
+    def play_audio_background(self, audio_data: np.ndarray, sample_rate: Optional[int] = None, bit_depth: Optional[int] = None):
         """
         Play audio data in the background.
 
@@ -248,22 +250,57 @@ class Microphone:
             bit_depth (Optional[int]): The bit depth of the audio data. Defaults to the instance's bit depth.
 
         Returns:
-            simpleaudio.PlayObject: The play object for the audio.
+            A playback object that can be used to control playback.
         """
         if sample_rate is None:
             sample_rate = self.sample_rate
         if bit_depth is None:
             bit_depth = self.bit_depth
             
+        # Normalize to 16-bit range
         if bit_depth == 8:
-            # Normalize to 16-bit range
             audio_data = audio_data.astype(np.int16)
             np.multiply(audio_data, 32767 / np.max(np.abs(audio_data)), out=audio_data, casting='unsafe')
         else:
-            # Normalize to 16-bit range
             np.multiply(audio_data, 32767 / np.max(np.abs(audio_data)), out=audio_data, casting='unsafe')
             audio_data = audio_data.astype(np.int16)
-        return simpleaudio.play_buffer(audio_data, num_channels=1, bytes_per_sample=2, sample_rate=sample_rate)
+        
+        # Convert numpy array to bytes
+        bytes_io = io.BytesIO()
+        bytes_io.write(audio_data.tobytes())
+        bytes_io.seek(0)
+        
+        # Create AudioSegment from raw audio data
+        audio_segment = AudioSegment(
+            data=bytes_io.read(),
+            sample_width=2,  # 16-bit = 2 bytes
+            frame_rate=sample_rate,
+            channels=1
+        )
+        
+        # Create a PlaybackThread to play in background
+        from threading import Thread
+        
+        class PlaybackThread(Thread):
+            def __init__(self, audio_segment):
+                super().__init__()
+                self.audio_segment = audio_segment
+                self.daemon = True
+                self._is_playing = True
+                
+            def run(self):
+                play(self.audio_segment)
+                self._is_playing = False
+                
+            def wait_done(self):
+                self.join()
+                
+            def is_playing(self):
+                return self._is_playing
+                
+        playback_thread = PlaybackThread(audio_segment)
+        playback_thread.start()
+        return playback_thread
     
     def play_audio(self, audio_data: np.ndarray, sample_rate: Optional[int] = None, bit_depth: Optional[int] = None) -> None:
         """

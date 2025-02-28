@@ -7,6 +7,16 @@ The Python SDK for the Frame AI glasses from [Brilliant Labs](https://github.com
 pip3 install frame-sdk
 ```
 
+### Additional Setup for Termux Users
+
+If you're using this SDK in Termux on Android, you'll need to install FFmpeg for audio playback:
+
+```sh
+pkg install ffmpeg
+```
+
+This is required for the pydub library to play audio through the Microphone class.
+
 ## Documentation
 
 Check out [the docs](https://docs.brilliant.xyz/frame/building-apps/) for complete guidance on everything you can do with the Frame.
