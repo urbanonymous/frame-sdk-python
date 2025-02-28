@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 from typing import Awaitable, Callable, Optional
-from .bluetooth import Bluetooth, FrameDataTypePrefixes
+from .bluetooth_tcp import BluetoothTCP, FrameDataTypePrefixes
 from .files import Files
 from .camera import Camera
 from .display import Display
@@ -16,9 +16,17 @@ class Frame:
     
     debug_on_new_connection: bool = False
 
-    def __init__(self):
-        """Initialize the Frame device and its components."""
-        self.bluetooth = Bluetooth()
+    def __init__(self, host: str = "localhost", port: int = 8011, 
+                keep_alive: bool = True, keep_alive_interval: float = 30.0):
+        """Initialize the Frame device and its components.
+        
+        Args:
+            host (str): The host name or IP address of the Bluetooth-TCP bridge. Defaults to "localhost".
+            port (int): The port number of the Bluetooth-TCP bridge. Defaults to 8011.
+            keep_alive (bool): Whether to enable keep-alive functionality to maintain the connection.
+            keep_alive_interval (float): The interval in seconds between keep-alive pings.
+        """
+        self.bluetooth = BluetoothTCP(host, port)
         self.files = Files(self)
         self.camera = Camera(self)
         self.display = Display(self)
@@ -26,6 +34,9 @@ class Frame:
         self.motion = Motion(self)
         self._lua_on_wake = None
         self._callback_on_wake = None
+        self._keep_alive = keep_alive
+        self._keep_alive_interval = keep_alive_interval
+        self._keep_alive_task = None
         
     async def __aenter__(self) -> 'Frame':
         """Enter the asynchronous context manager."""
@@ -34,14 +45,27 @@ class Frame:
     
     async def __aexit__(self, exc_type: Optional[type], exc_value: Optional[BaseException], traceback: Optional[object]) -> None:
         """Exit the asynchronous context manager."""
+        if self._keep_alive_task is not None:
+            self._keep_alive_task.cancel()
+            try:
+                await self._keep_alive_task
+            except asyncio.CancelledError:
+                pass
+            self._keep_alive_task = None
+            
         if self.bluetooth.is_connected():
             await self.bluetooth.disconnect()
         
     async def ensure_connected(self) -> None:
         """Ensure the Frame is connected, establishing a connection if not."""
         if not self.bluetooth.is_connected():
-            await self.bluetooth.connect()
-            self.bluetooth.print_debugging = Frame.debug_on_new_connection
+            await self.bluetooth.connect(print_debugging=Frame.debug_on_new_connection, 
+                                        default_timeout=self.bluetooth.default_timeout)
+            
+            # Start keep-alive if enabled
+            if self._keep_alive and self._keep_alive_task is None:
+                self._keep_alive_task = self.bluetooth.start_keep_alive(self._keep_alive_interval)
+                
             await self.bluetooth.send_break_signal()
             await self.inject_all_library_functions()
             await self.run_lua(f"is_awake=true;frame.time.utc({int(time.time())});frame.time.zone('{time.strftime('%z')[:3]}:{time.strftime('%z')[3:]}')", checked=True)
