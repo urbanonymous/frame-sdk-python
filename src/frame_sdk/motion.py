@@ -3,7 +3,8 @@ import math
 from typing import Awaitable, Callable, Optional, TYPE_CHECKING, Tuple
 import asyncio
 
-from .bluetooth import FrameDataTypePrefixes
+from .bluetooth_tcp import FrameDataTypePrefixes
+
 
 if TYPE_CHECKING:
     from .frame import Frame

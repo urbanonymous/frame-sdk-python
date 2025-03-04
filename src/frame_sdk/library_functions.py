@@ -1,4 +1,5 @@
-from .bluetooth import FrameDataTypePrefixes
+from .bluetooth_tcp import FrameDataTypePrefixes
+
 
 # these are some helper functions that we run on the Frame.  The SDK will not work well if these do not exist.  Every time you connect to a Frame, the SDK will automatically inject these functions into the Frame.
 library_print_long = """

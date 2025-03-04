@@ -9,7 +9,8 @@ import io
 import time
 import wave
 
-from .bluetooth import FrameDataTypePrefixes
+from .bluetooth_tcp import FrameDataTypePrefixes
+
 
 if TYPE_CHECKING:
     from .frame import Frame
