@@ -6,6 +6,7 @@ import logging
 # Add the src directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.frame_sdk import Frame
+from src.frame_sdk.display import PaletteColors
 
 async def main():
 
@@ -15,7 +16,7 @@ async def main():
     # Connect to a Frame device over Bluetooth TCP at localhost:5555
     # Use log_level=logging.DEBUG for more verbose logs
     # Set MTU size to 185 bytes (optimal for Frame devices)
-    async with Frame(host="localhost", port=5555, log_level=logging.INFO, mtu_size=185) as frame:
+    async with Frame(host="localhost", port=5555, log_level=logging.INFO, mtu_size=20) as frame:
 
         await frame.bluetooth.send_break_signal()
 
