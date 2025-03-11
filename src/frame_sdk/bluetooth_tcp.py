@@ -64,7 +64,7 @@ class BluetoothTCP:
         self._user_data_response_handlers: Dict[
             FrameDataTypePrefixes, Callable[[bytes], None]
         ] = {}
-        self._max_payload_size = 100  # Configurable, no strict MTU in TCP
+        self._max_payload_size = 20  # Configurable, no strict MTU in TCP
         self._auto_reconnect = True
         self._last_activity_time = 0
         
