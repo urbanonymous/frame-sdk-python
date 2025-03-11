@@ -316,4 +316,3 @@ class Frame:
         else:
             # Neither lua script nor callback
             await self.files.write_file("main.lua", b"is_awake=true", checked=True)
-∫
