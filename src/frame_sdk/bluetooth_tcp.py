@@ -17,6 +17,7 @@ class FrameDataTypePrefixes(Enum):
     DEBUG_PRINT = 0x06
     LONG_TEXT = 0x0A
     LONG_TEXT_END = 0x0B
+    LUA_SCRIPT = 0x0C
 
     @property
     def value_as_hex(self):
@@ -493,6 +494,7 @@ class BluetoothTCP:
         
         Args:
             data (bytearray): The data to send
+            raw (bool): Whether to bypass size checks (for special commands like MTU negotiation)
             
         Raises:
             Exception: If not connected or the payload is too large
@@ -520,8 +522,18 @@ class BluetoothTCP:
             self.logger.error(f"[OUTGOING] {timestamp} - Failed to send: not connected")
             raise Exception("Not connected")
             
-        if len(data) > self._max_payload_size:
+        if not raw and len(data) > self._max_payload_size:
+            # Provide better error details
+            data_preview = data[:20].decode('utf-8', errors='replace') + "..." if len(data) > 20 else data.decode('utf-8', errors='replace')
             self.logger.error(f"[OUTGOING] {timestamp} - Payload too large: {len(data)} > {self._max_payload_size}")
+            self.logger.error(f"[OUTGOING] {timestamp} - Data preview: '{data_preview}'")
+            
+            # Suggest alternatives based on data type
+            if len(data) < 100:
+                self.logger.error(f"[OUTGOING] {timestamp} - For small payloads, try breaking into smaller chunks with send_chunked_lua")
+            else:
+                self.logger.error(f"[OUTGOING] {timestamp} - For large payloads, use send_chunked_lua or send_chunked_data")
+                
             raise Exception(
                 f"Payload too large: {len(data)} > {self._max_payload_size}. Use send_chunked_data for large payloads."
             )
@@ -606,40 +618,120 @@ class BluetoothTCP:
     def print_debugging(self, value: bool):
         self._print_debugging = value
 
-    async def send_lua(
-        self, string: str, await_print: bool = False, timeout: Optional[float] = None
-    ) -> Optional[str]:
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        self.logger.info(f"[OUTGOING] {timestamp} - Sending Lua script, length: {len(string)} chars, await_print: {await_print}")
-        
-        if not self.is_connected():
-            self.logger.warning(f"[OUTGOING] {timestamp} - Not connected, attempting to reconnect")
-            try:
-                await self.reconnect()
-            except Exception as e:
-                self.logger.error(f"[OUTGOING] {timestamp} - Failed to reconnect: {e}")
-                raise Exception(f"Not connected and failed to reconnect: {e}")
-                
-        if await_print:
-            self._print_response_event.clear()
-        await self._transmit(string.encode())
-        if await_print:
-            self.logger.info(f"[OUTGOING] {timestamp} - Waiting for print response, timeout: {timeout if timeout is not None else self._default_timeout}")
-            return await self.wait_for_print(timeout)
-        return None
+    async def send_lua(self, lua_string: str, wait_for_print: bool = False, wait_for_print_timeout: float = 2.0):
+        """Safely transmit a Lua script.
 
-    async def wait_for_print(self, timeout: Optional[float] = None) -> str:
+        Args:
+            lua_string: The Lua code to transmit
+            wait_for_print: Whether to wait for a print response
+            wait_for_print_timeout: The timeout for waiting for print response
+
+        Returns:
+            The print response if wait_for_print is True, otherwise None
+        """
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        timeout = timeout if timeout is not None else self._default_timeout
+        
+        # Calculate estimated size BEFORE adding the protocol overhead
+        encoded_str = lua_string.encode()
+        estimated_size = len(encoded_str)
+        
+        # Conservative approach: Add 4 bytes for protocol overhead
+        # (1 byte for prefix, 1 for GATT overhead, 2 for safety margin)
+        effective_size = estimated_size + 4
+        
+        # Always use chunking for scripts that approach or exceed max_payload_size
+        if effective_size >= self._max_payload_size - 2:  # Leave a 2-byte safety margin
+            self.logger.info(f"[OUTGOING] {timestamp} - Lua script size ({estimated_size} bytes) approaches MTU limit " 
+                           f"({self._max_payload_size} bytes). Using chunked transmission.")
+            return await self.send_chunked_lua(lua_string, wait_for_print, wait_for_print_timeout)
+        
+        # For very small scripts that fit comfortably within MTU
+        self.logger.info(f"[OUTGOING] {timestamp} - Sending Lua ({estimated_size} bytes): {lua_string}")
+        
         try:
-            self.logger.info(f"[INCOMING] {timestamp} - Waiting for print response, timeout: {timeout}")
-            await asyncio.wait_for(self._print_response_event.wait(), timeout)
-            self.logger.info(f"[INCOMING] {timestamp} - Received print response, length: {len(self._last_print_response)} chars")
-        except asyncio.TimeoutError:
-            self.logger.error(f"[INCOMING] {timestamp} - No print response within {timeout} seconds")
-            raise Exception(f"No print response within {timeout} seconds")
-        self._print_response_event.clear()
-        return self._last_print_response
+            # Prefix with type
+            data = bytearray([FrameDataTypePrefixes.LUA_SCRIPT.value])
+            # Append the lua payload
+            data.extend(lua_string.encode())
+            # Transmit
+            await self._transmit(data)
+            
+            if wait_for_print:
+                return await self._receive_expect_print(wait_for_print_timeout)
+            return None
+            
+        except ConnectionError as e:
+            self.logger.error(f"[OUTGOING] {timestamp} - Connection lost while sending Lua: {e}")
+            self._connected = False
+            self._user_disconnect_handler()
+            raise Exception(f"Connection lost while sending Lua: {e}")
+        except Exception as e:
+            self.logger.error(f"[OUTGOING] {timestamp} - Failed to send Lua: {e}")
+            # Fall back to chunked transmission if regular transmission fails due to size
+            if "Payload too large" in str(e):
+                self.logger.info(f"[OUTGOING] {timestamp} - Falling back to chunked transmission")
+                return await self.send_chunked_lua(lua_string, wait_for_print, wait_for_print_timeout)
+            # Re-raise other errors
+            raise Exception(f"Failed to send Lua: {e}")
+
+    async def _receive_expect_print(self, timeout: float = 2.0) -> Optional[str]:
+        """Wait for a print response from the device.
+        
+        Args:
+            timeout: Maximum time to wait for a response in seconds
+            
+        Returns:
+            The print response text or None if timeout occurs
+        """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self.logger.info(f"[INCOMING] {timestamp} - Waiting for print response (timeout: {timeout}s)")
+        
+        try:
+            # Use the existing wait_for_print method if available
+            if hasattr(self, 'wait_for_print'):
+                return await self.wait_for_print(timeout)
+                
+            # Fallback implementation if wait_for_print is not available
+            start_time = asyncio.get_event_loop().time()
+            buffer = bytearray()
+            
+            while asyncio.get_event_loop().time() - start_time < timeout:
+                # Check if we're still connected
+                if not self._connected:
+                    self.logger.error(f"[INCOMING] {timestamp} - Connection lost while waiting for print response")
+                    raise Exception("Connection lost while waiting for print response")
+                    
+                # Try to read data with a short timeout
+                try:
+                    data = await asyncio.wait_for(self._reader.read(1024), 0.1)
+                    if data:
+                        buffer.extend(data)
+                        # Look for a print message
+                        try:
+                            response = buffer.decode('utf-8')
+                            if '[PRINT]' in response:
+                                # Extract the print message
+                                print_start = response.find('[PRINT]')
+                                print_end = response.find('\n', print_start)
+                                if print_end == -1:
+                                    print_end = len(response)
+                                print_msg = response[print_start + 8:print_end].strip()
+                                self.logger.info(f"[INCOMING] {timestamp} - Received print response: {print_msg}")
+                                return print_msg
+                        except UnicodeDecodeError:
+                            # Continue collecting data if we can't decode yet
+                            pass
+                except asyncio.TimeoutError:
+                    # No data available, continue waiting
+                    await asyncio.sleep(0.1)
+                    
+            # Timeout occurred
+            self.logger.warning(f"[INCOMING] {timestamp} - Timeout waiting for print response")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"[INCOMING] {timestamp} - Error waiting for print response: {e}")
+            return None
 
     def start_keep_alive(self, interval: float = 30.0):
         """Start a keep-alive task in the background.
@@ -690,71 +782,114 @@ class BluetoothTCP:
         return None
 
     async def send_chunked_lua(
-        self, string: str, await_print: bool = False, timeout: Optional[float] = None
+        self, lua_string: str, wait_for_print: bool = False, wait_for_print_timeout: float = 2.0
     ) -> Optional[str]:
-        """Send a Lua script in chunks to handle larger scripts.
+        """Send a large Lua script in chunks.
         
+        This method breaks down the Lua script into very small chunks to accommodate tiny MTU sizes.
+        It uses a temporary file approach for reliability.
+
         Args:
-            string (str): The Lua script to send
-            await_print (bool): Whether to wait for and return the print response
-            timeout (Optional[float]): The timeout in seconds
-            
+            lua_string: The Lua script to send
+            wait_for_print: Whether to wait for a print response
+            wait_for_print_timeout: Timeout for print response, defaults to 2 seconds
+
         Returns:
-            Optional[str]: The print response if await_print is True
+            Print response if wait_for_print is True, otherwise None
         """
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        self.logger.info(f"[OUTGOING] {timestamp} - Sending chunked Lua script, total length: {len(string)} chars")
         
-        if not self.is_connected():
-            try:
-                await self.reconnect()
-            except Exception as e:
-                raise Exception(f"Not connected and failed to reconnect: {e}")
+        # Calculate a safe chunk size for the given MTU
+        # We need to leave room for:
+        # - 1 byte for the prefix
+        # - 1 byte for any text wrappers
+        # - 2 bytes for protocol overhead
+        # - 2 bytes safety margin
+        #
+        # Start with a very conservative chunk size that will definitely work
+        chunk_size = max(10, self._max_payload_size - 7)
         
-        # Use a very small, safe chunk size
-        chunk_size = 12  # Ultra conservative chunk size for small MTU
+        self.logger.info(
+            f"[OUTGOING] {timestamp} - Sending Lua script in chunks (total size: {len(lua_string)} bytes, "
+            f"chunk size: {chunk_size} bytes)"
+        )
         
-        # For small MTU environment, write directly to a file and require it
-        # This avoids the complexity of chunking the Lua script
+        # Generate a short file name (keeping it short is important for tiny MTU)
+        import random
+        import string
+        file_id = ''.join(random.choice(string.ascii_lowercase) for _ in range(8))
+        tmp_filename = f"t{file_id}"  # Very short name: t + 8 chars
+        
         try:
-            from uuid import uuid4
-            random_name = str(uuid4())[:8]  # Use a UUID for unique file name
+            # --- Approach 1: File-based ---
+            # First, create a temporary Lua file with our script content
+            self.logger.info(f"[OUTGOING] {timestamp} - Creating temporary Lua file: {tmp_filename}.lua")
             
-            # Create a temporary file with our Lua code
-            # First create an empty file
-            await self._transmit(f"file = frame.file.open('/{random_name}.lua', 'write')".encode())
-            await asyncio.sleep(0.1)
+            # Write the file header
+            await self.send_lua(f"local f = io.open('{tmp_filename}.lua', 'w')", wait_for_print, wait_for_print_timeout)
             
-            # Write the file content in small chunks
-            for i in range(0, len(string), chunk_size):
-                chunk = string[i:i+chunk_size].replace('\\', '\\\\').replace("'", "\\'")
-                write_cmd = f"file:write('{chunk}')"
-                await self._transmit(write_cmd.encode())
-                await asyncio.sleep(0.1)
+            # Process the Lua script in very small chunks
+            for i in range(0, len(lua_string), chunk_size):
+                chunk = lua_string[i:i+chunk_size]
+                
+                # Escape any quotes or backslashes in the chunk
+                escaped_chunk = chunk.replace('\\', '\\\\').replace("'", "\\'")
+                
+                # Build the write command - keep it as short as possible
+                write_cmd = f"f:write('{escaped_chunk}')"
+                
+                # Check if this command will fit within our MTU
+                while len(write_cmd.encode()) + 7 > self._max_payload_size and len(escaped_chunk) > 1:
+                    # If too large, reduce the chunk size and try again
+                    escaped_chunk = escaped_chunk[:-1]  # Remove last character
+                    write_cmd = f"f:write('{escaped_chunk}')"
+                
+                # Send the chunk with a small delay to avoid overwhelming the device
+                self.logger.debug(f"[OUTGOING] {timestamp} - Sending chunk {i//chunk_size + 1}, size: {len(escaped_chunk)}")
+                await self.send_lua(write_cmd, wait_for_print, wait_for_print_timeout)
+                await asyncio.sleep(0.05)  # Small delay between chunks
             
             # Close the file
-            await self._transmit("file:close()".encode())
-            await asyncio.sleep(0.1)
+            await self.send_lua("f:close()", wait_for_print, wait_for_print_timeout)
             
-            # Execute the file with require
-            if await_print:
-                self._print_response_event.clear()
-                await self._transmit(f"require('{random_name}')".encode())
-                result = await self.wait_for_print(timeout)
-                
-                # Clean up
-                await self._transmit(f"frame.file.remove('/{random_name}.lua')".encode())
-                return result
-            else:
-                await self._transmit(f"require('{random_name}')".encode())
-                # Clean up
-                await asyncio.sleep(0.5)  # Give it time to execute
-                await self._transmit(f"frame.file.remove('/{random_name}.lua')".encode())
-                return None
-                
+            # Execute the file
+            self.logger.info(f"[OUTGOING] {timestamp} - Executing temporary Lua file")
+            result = await self.send_lua(f"require('{tmp_filename}')", wait_for_print, wait_for_print_timeout)
+            
+            # Clean up the file
+            await self.send_lua(f"os.remove('{tmp_filename}.lua')", False)
+            
+            return result
+            
         except Exception as e:
-            self.logger.error(f"[OUTGOING] {timestamp} - Error in chunked lua transmission: {e}")
-            raise e
+            self.logger.error(f"[OUTGOING] {timestamp} - Error sending chunked Lua: {e}")
+            
+            # Cleanup attempt on error
+            try:
+                await self.send_lua(f"os.remove('{tmp_filename}.lua')", False)
+            except:
+                pass
+                
+            # For very small scripts, try alternative method as fallback
+            if len(lua_string) < 100:
+                self.logger.info(f"[OUTGOING] {timestamp} - Attempting fallback for small script")
+                try:
+                    # For small scripts, try direct line-by-line execution
+                    lines = lua_string.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            await self.send_lua(line, False)
+                            await asyncio.sleep(0.1)  # Small delay between lines
+                    
+                    # Wait for print at the end if requested
+                    if wait_for_print:
+                        return await self._receive_expect_print(wait_for_print_timeout)
+                    return None
+                except Exception as inner_e:
+                    self.logger.error(f"[OUTGOING] {timestamp} - Fallback also failed: {inner_e}")
+            
+            raise Exception(f"Failed to send chunked Lua: {e}")
 
     async def send_chunked_data(self, data: bytearray, chunk_size: Optional[int] = None) -> None:
         """Send data in chunks for large payloads.
@@ -809,3 +944,16 @@ class BluetoothTCP:
         if not self.is_connected():
             await self.reconnect()
         await self._transmit(bytearray(b"\x03"))
+
+    async def wait_for_print(self, timeout: Optional[float] = None) -> str:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        timeout = timeout if timeout is not None else self._default_timeout
+        try:
+            self.logger.info(f"[INCOMING] {timestamp} - Waiting for print response, timeout: {timeout}")
+            await asyncio.wait_for(self._print_response_event.wait(), timeout)
+            self.logger.info(f"[INCOMING] {timestamp} - Received print response, length: {len(self._last_print_response)} chars")
+        except asyncio.TimeoutError:
+            self.logger.error(f"[INCOMING] {timestamp} - No print response within {timeout} seconds")
+            raise Exception(f"No print response within {timeout} seconds")
+        self._print_response_event.clear()
+        return self._last_print_response
