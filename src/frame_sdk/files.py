@@ -31,42 +31,74 @@ class Files:
         Raises:
             Exception: If the file cannot be opened, written to, or closed.
         """
-        response = await self.frame.bluetooth.send_lua(
-            f"w=frame.file.open(\"{path}\",\"write\")" +
-            (";print(\"o\")" if checked else ""), await_print=checked)
-        if checked and response != "o":
-            raise Exception(f"Couldn't open file \"{path}\" for writing: {response}")
-        response = await self.frame.bluetooth.send_lua(
-            f"frame.bluetooth.receive_callback((function(d)w:write(d)end))" +
-            (";print(\"c\")" if checked else ""), await_print=checked)
-        if checked and response != "c":
-            raise Exception(f"Couldn't register callback for writing to file \"{path}\": {response}")
-        
-        current_index = 0
-        while current_index < len(data):
-            max_payload = self.frame.bluetooth.max_data_payload()-1
-            next_chunk_length = min(len(data) - current_index, max_payload)
-            if next_chunk_length == 0:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await self.frame.bluetooth.send_lua(
+                    f"w=frame.file.open(\"{path}\",\"write\")" +
+                    (";print(\"o\")" if checked else ""), await_print=checked)
+                if checked and response != "o":
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        raise Exception(f"Couldn't open file \"{path}\" for writing: {response}")
+                
+                response = await self.frame.bluetooth.send_lua(
+                    f"frame.bluetooth.receive_callback((function(d)w:write(d)end))" +
+                    (";print(\"c\")" if checked else ""), await_print=checked)
+                if checked and response != "c":
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        raise Exception(f"Couldn't register callback for writing to file \"{path}\": {response}")
+                
+                # Use a smaller chunk size to accommodate small MTU
+                # For MTU of 20, we need a max_chunk of around 16 bytes
+                max_chunk_size = 16
+                
+                # Track the number of chunks for the final LONG_DATA_END message
+                current_index = 0
+                chunk_count = 0
+                
+                while current_index < len(data):
+                    next_chunk_length = min(len(data) - current_index, max_chunk_size)
+                    if next_chunk_length == 0:
+                        break
+                    
+                    chunk = data[current_index:current_index+next_chunk_length]
+                    # Send data with LONG_DATA prefix (0x01)
+                    await self.frame.bluetooth.send_data(bytes([1]) + chunk)
+                    # Add a small delay between chunks to avoid overwhelming the device
+                    await asyncio.sleep(0.05)
+                    current_index += next_chunk_length
+                    chunk_count += 1
+                
+                # Send LONG_DATA_END marker (0x02) with the chunk count
+                if chunk_count > 0:
+                    await self.frame.bluetooth.send_data(bytes([2]) + str(chunk_count).encode())
+                
+                response = await self.frame.bluetooth.send_lua(
+                    "w:close()" + (";print(\"+\")" if checked else ""),
+                    await_print=checked)
+                if checked and response != "+":
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        raise Exception(f"Couldn't close file \"{path}\": {response}")
+                
+                # If we get here, we've successfully written the file
                 break
-            
-            if next_chunk_length <= 0:
-                raise Exception("MTU too small to write file, or escape character at end of chunk")
-            
-            chunk = data[current_index:current_index + next_chunk_length]
-            await self.frame.bluetooth.send_data(chunk)
-            
-            current_index += next_chunk_length
-            if current_index < len(data):
-                await asyncio.sleep(0.1)
-            
-        response = await self.frame.bluetooth.send_lua("w:close();print(\"c\")", await_print=checked)
-        if checked and response != "c":
-            raise Exception("Error closing file")
-        response = await self.frame.bluetooth.send_lua(
-            f"frame.bluetooth.receive_callback(nil)" +
-            (";print(\"c\")" if checked else ""), await_print=checked)
-        if checked and response != "c":
-            raise Exception(f"Couldn't remove callback for writing to file \"{path}\"")
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Error writing file \"{path}\" (attempt {attempt+1}/{max_retries}): {str(e)}. Retrying...")
+                    await asyncio.sleep(0.5)
+                else:
+                    print(f"Failed to write file \"{path}\" after {max_retries} attempts: {str(e)}")
+                    raise
         
     async def file_exists(self, path: str) -> bool:
         """
