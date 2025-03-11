@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Frame BLE Test</title>
+</head>
+<body>
+    <button id="connect">Connect to Frame</button>
+    <button id="send" disabled>Send 100 Bytes</button>
+    <p id="status">Status: Disconnected</p>
+    <p id="received">Received: </p>
+
+    <script>
+        let device, rxChar, txChar;
+
+        document.getElementById('connect').addEventListener('click', async () => {
+            try {
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ namePrefix: 'Frame' }],
+                    optionalServices: ['7a230001-5475-a6a4-654c-8431f6ad49c4']
+                });
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService('7a230001-5475-a6a4-654c-8431f6ad49c4');
+                rxChar = await service.getCharacteristic('7a230002-5475-a6a4-654c-8431f6ad49c4');
+                txChar = await service.getCharacteristic('7a230003-5475-a6a4-654c-8431f6ad49c4');
+
+                // Enable notifications
+                await txChar.startNotifications();
+                txChar.addEventListener('characteristicvaluechanged', (event) => {
+                    const value = event.target.value;
+                    const text = new TextDecoder().decode(value);
+                    document.getElementById('received').textContent = `Received: ${value.byteLength} bytes - ${text}`;
+                });
+
+                document.getElementById('status').textContent = 'Status: Connected';
+                document.getElementById('send').disabled = false;
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('status').textContent = `Status: Error - ${error.message}`;
+            }
+        });
+
+        document.getElementById('send').addEventListener('click', async () => {
+            if (!rxChar) return;
+            try {
+                const data = new Uint8Array(100).fill(65); // 100 bytes of 'A'
+                await rxChar.writeValue(data);
+                document.getElementById('status').textContent = 'Status: Sent 100 bytes';
+            } catch (error) {
+                console.error('Send error:', error);
+                document.getElementById('status').textContent = `Status: Send Error - ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html>
