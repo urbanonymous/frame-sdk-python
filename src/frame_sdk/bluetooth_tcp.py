@@ -85,6 +85,7 @@ class BluetoothTCP:
             )
             self._connected = True
             self._last_activity_time = asyncio.get_event_loop().time()
+            print("Connected to {self.host}:{self.port}")
             asyncio.create_task(self._read_loop())
             if self._print_debugging:
                 print(f"Connected to {self.host}:{self.port}")
@@ -116,7 +117,7 @@ class BluetoothTCP:
             
         try:
             # Send a simple command that should always produce a response
-            response = await self.send_lua("print('ping')", await_print=True, timeout=2.0)
+            response = await self.send_lua("print('ping')", await_print=True, timeout=5.0)
             return response == "ping"
         except Exception:
             return False
@@ -195,14 +196,29 @@ class BluetoothTCP:
         """Background task that reads data from the TCP connection."""
         while self._connected:
             try:
-                # Assuming length-prefixed data (2-byte length); adjust if bridge uses different framing
-                length_bytes = await self._reader.readexactly(2)
-                length = int.from_bytes(length_bytes, "big")
-                data = await self._reader.readexactly(length)
+                # Try to read data in chunks
+                if self._print_debugging:
+                    print("Waiting for data...")
+                data = await self._reader.read(1024)  # Read up to 1024 bytes at a time
+                
+                if not data:  # Connection closed
+                    if self._print_debugging:
+                        print("Connection closed by remote host")
+                    self._connected = False
+                    self._user_disconnect_handler()
+                    if self._auto_reconnect:
+                        asyncio.create_task(self._delayed_reconnect())
+                    break
+                
+                # Print raw data for debugging
+                if self._print_debugging:
+                    print(f"Raw data received: {' '.join([f'{b:02X}' for b in data])}")
+                
                 # Update activity timestamp on successful read
                 self._last_activity_time = asyncio.get_event_loop().time()
                 await self._notification_handler(data)
-            except (asyncio.IncompleteReadError, ConnectionError):
+            except (asyncio.IncompleteReadError, ConnectionError) as e:
+                print(f"Connection error: {e}")
                 self._connected = False
                 self._user_disconnect_handler()
                 if self._auto_reconnect:
@@ -218,104 +234,117 @@ class BluetoothTCP:
                 break
 
     async def _notification_handler(self, data: bytearray):
-        if data[0] == FrameDataTypePrefixes.LONG_TEXT.value:
-            if (
-                self._ongoing_print_response is None
-                or self._ongoing_print_response_chunk_count is None
-            ):
-                self._ongoing_print_response = bytearray()
-                self._ongoing_print_response_chunk_count = 0
+        # If the first byte is in our protocol range (0x01-0x0B), treat as protocol message
+        if data and data[0] <= 0x0B:
+            if data[0] == FrameDataTypePrefixes.LONG_TEXT.value:
+                if (
+                    self._ongoing_print_response is None
+                    or self._ongoing_print_response_chunk_count is None
+                ):
+                    self._ongoing_print_response = bytearray()
+                    self._ongoing_print_response_chunk_count = 0
+                    if self._print_debugging:
+                        print("Starting receiving new long printed string")
+                self._ongoing_print_response += data[1:]
+                self._ongoing_print_response_chunk_count += 1
                 if self._print_debugging:
-                    print("Starting receiving new long printed string")
-            self._ongoing_print_response += data[1:]
-            self._ongoing_print_response_chunk_count += 1
-            if self._print_debugging:
-                print(
-                    f"Received chunk #{self._ongoing_print_response_chunk_count}: {data[1:].decode()}"
-                )
-            if len(self._ongoing_print_response) > self._max_receive_buffer:
-                raise Exception(
-                    f"Buffered long printed string exceeds {self._max_receive_buffer} bytes"
-                )
+                    print(
+                        f"Received chunk #{self._ongoing_print_response_chunk_count}: {data[1:].decode()}"
+                    )
+                if len(self._ongoing_print_response) > self._max_receive_buffer:
+                    raise Exception(
+                        f"Buffered long printed string exceeds {self._max_receive_buffer} bytes"
+                    )
 
-        elif data[0] == FrameDataTypePrefixes.LONG_TEXT_END.value:
-            total_expected_chunk_count = int(data[1:].decode()) if data[1:] else 0
-            if self._print_debugging:
-                print(
-                    f"Received final string chunk count: {total_expected_chunk_count}"
-                )
-            if self._ongoing_print_response_chunk_count != total_expected_chunk_count:
-                raise Exception(
-                    f"Chunk count mismatch: expected {total_expected_chunk_count}, got {self._ongoing_print_response_chunk_count}"
-                )
-            self._last_print_response = self._ongoing_print_response.decode()
-            self._print_response_event.set()
-            self._ongoing_print_response = None
-            self._ongoing_print_response_chunk_count = None
-            if self._print_debugging:
-                print(
-                    f"Finished receiving long printed string: {self._last_print_response}"
-                )
-            self._user_print_response_handler(self._last_print_response)
-
-        elif (
-            data[0] == _FRAME_DATA_PREFIX
-            and data[1] == FrameDataTypePrefixes.LONG_DATA.value
-        ):
-            if (
-                self._ongoing_data_response is None
-                or self._ongoing_data_response_chunk_count is None
-            ):
-                self._ongoing_data_response = bytearray()
-                self._ongoing_data_response_chunk_count = 0
-                self._last_data_response = bytes()
+            elif data[0] == FrameDataTypePrefixes.LONG_TEXT_END.value:
+                total_expected_chunk_count = int(data[1:].decode()) if data[1:] else 0
                 if self._print_debugging:
-                    print("Starting receiving new long raw data")
-            self._ongoing_data_response += data[2:]
-            self._ongoing_data_response_chunk_count += 1
-            if self._print_debugging:
-                print(
-                    f"Received data chunk #{self._ongoing_data_response_chunk_count}: {len(data[2:])} bytes"
-                )
-            if len(self._ongoing_data_response) > self._max_receive_buffer:
-                raise Exception(
-                    f"Buffered long raw data exceeds {self._max_receive_buffer} bytes"
-                )
+                    print(
+                        f"Received final string chunk count: {total_expected_chunk_count}"
+                    )
+                if self._ongoing_print_response_chunk_count != total_expected_chunk_count:
+                    raise Exception(
+                        f"Chunk count mismatch: expected {total_expected_chunk_count}, got {self._ongoing_print_response_chunk_count}"
+                    )
+                self._last_print_response = self._ongoing_print_response.decode()
+                self._print_response_event.set()
+                self._ongoing_print_response = None
+                self._ongoing_print_response_chunk_count = None
+                if self._print_debugging:
+                    print(
+                        f"Finished receiving long printed string: {self._last_print_response}"
+                    )
+                self._user_print_response_handler(self._last_print_response)
 
-        elif (
-            data[0] == _FRAME_DATA_PREFIX
-            and data[1] == FrameDataTypePrefixes.LONG_DATA_END.value
-        ):
-            total_expected_chunk_count = int(data[2:].decode()) if data[2:] else 0
-            if self._print_debugging:
-                print(f"Received final data chunk count: {total_expected_chunk_count}")
-            if self._ongoing_data_response_chunk_count != total_expected_chunk_count:
-                raise Exception(
-                    f"Chunk count mismatch: expected {total_expected_chunk_count}, got {self._ongoing_data_response_chunk_count}"
-                )
-            self._last_data_response = bytes(self._ongoing_data_response)
-            self._data_response_event.set()
-            self._ongoing_data_response = None
-            self._ongoing_data_response_chunk_count = None
-            if self._print_debugging:
-                print(
-                    f"Finished receiving long raw data: {len(self._last_data_response)} bytes"
-                )
-            self.call_data_response_handlers(self._last_data_response)
+            elif (
+                data[0] == _FRAME_DATA_PREFIX
+                and len(data) > 1
+                and data[1] == FrameDataTypePrefixes.LONG_DATA.value
+            ):
+                if (
+                    self._ongoing_data_response is None
+                    or self._ongoing_data_response_chunk_count is None
+                ):
+                    self._ongoing_data_response = bytearray()
+                    self._ongoing_data_response_chunk_count = 0
+                    self._last_data_response = bytes()
+                    if self._print_debugging:
+                        print("Starting receiving new long raw data")
+                self._ongoing_data_response += data[2:]
+                self._ongoing_data_response_chunk_count += 1
+                if self._print_debugging:
+                    print(
+                        f"Received data chunk #{self._ongoing_data_response_chunk_count}: {len(data[2:])} bytes"
+                    )
+                if len(self._ongoing_data_response) > self._max_receive_buffer:
+                    raise Exception(
+                        f"Buffered long raw data exceeds {self._max_receive_buffer} bytes"
+                    )
 
-        elif data[0] == _FRAME_DATA_PREFIX:
-            if self._print_debugging:
-                print(f"Received data: {len(data[1:])} bytes")
-            self._last_data_response = data[1:]
-            self._data_response_event.set()
-            self.call_data_response_handlers(data[1:])
+            elif (
+                data[0] == _FRAME_DATA_PREFIX
+                and len(data) > 1
+                and data[1] == FrameDataTypePrefixes.LONG_DATA_END.value
+            ):
+                total_expected_chunk_count = int(data[2:].decode()) if data[2:] else 0
+                if self._print_debugging:
+                    print(f"Received final data chunk count: {total_expected_chunk_count}")
+                if self._ongoing_data_response_chunk_count != total_expected_chunk_count:
+                    raise Exception(
+                        f"Chunk count mismatch: expected {total_expected_chunk_count}, got {self._ongoing_data_response_chunk_count}"
+                    )
+                self._last_data_response = bytes(self._ongoing_data_response)
+                self._data_response_event.set()
+                self._ongoing_data_response = None
+                self._ongoing_data_response_chunk_count = None
+                if self._print_debugging:
+                    print(
+                        f"Finished receiving long raw data: {len(self._last_data_response)} bytes"
+                    )
+                self.call_data_response_handlers(self._last_data_response)
 
+            elif data[0] == _FRAME_DATA_PREFIX:
+                if self._print_debugging:
+                    print(f"Received data: {len(data[1:])} bytes")
+                self._last_data_response = data[1:]
+                self._data_response_event.set()
+                self.call_data_response_handlers(data[1:])
+
+        # If not a protocol message, treat as raw text
         else:
-            self._last_print_response = data.decode()
-            if self._print_debugging:
-                print(f"Received printed string: {self._last_print_response}")
-            self._print_response_event.set()
-            self._user_print_response_handler(data.decode())
+            try:
+                text = data.decode()
+                if self._print_debugging:
+                    print(f"Received raw text: {text}")
+                self._last_print_response = text
+                self._print_response_event.set()
+                self._user_print_response_handler(text)
+            except UnicodeDecodeError:
+                if self._print_debugging:
+                    print(f"Received non-text data: {' '.join([f'{b:02X}' for b in data])}")
+                self._last_data_response = data
+                self._data_response_event.set()
+                self.call_data_response_handlers(data)
 
     async def _transmit(self, data: bytearray):
         """Send data to the device with proper error handling and reconnection logic.
@@ -327,7 +356,8 @@ class BluetoothTCP:
             Exception: If not connected or the payload is too large
         """
         if self._print_debugging:
-            print(f"Sending {len(data)} bytes: {data[:10]}{'...' if len(data) > 10 else ''}")
+            print(f"Sending {len(data)} bytes: {' '.join([f'{b:02X}' for b in data[:10]])}" + 
+                  ('...' if len(data) > 10 else ''))
             
         if not self._connected:
             raise Exception("Not connected")
@@ -338,8 +368,8 @@ class BluetoothTCP:
             )
             
         try:
-            length_bytes = len(data).to_bytes(2, "big")
-            self._writer.write(length_bytes + data)
+            # Send data without length prefix for better compatibility
+            self._writer.write(data)
             await self._writer.drain()
             # Update activity timestamp on successful write
             self._last_activity_time = asyncio.get_event_loop().time()

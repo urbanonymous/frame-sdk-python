@@ -14,7 +14,7 @@ import time
 class Frame:
     """Represents a Frame device. Instantiate this class via `async with Frame() as f:`."""
     
-    debug_on_new_connection: bool = False
+    debug_on_new_connection: bool = True
 
     def __init__(self, host: str = "localhost", port: int = 8011, 
                 keep_alive: bool = True, keep_alive_interval: float = 30.0):
@@ -67,7 +67,9 @@ class Frame:
                 self._keep_alive_task = self.bluetooth.start_keep_alive(self._keep_alive_interval)
                 
             await self.bluetooth.send_break_signal()
+            print("Connected to {self.bluetooth.host}:{self.bluetooth.port}")
             await self.inject_all_library_functions()
+            print("Injected all library functions")
             await self.run_lua(f"is_awake=true;frame.time.utc({int(time.time())});frame.time.zone('{time.strftime('%z')[:3]}:{time.strftime('%z')[3:]}')", checked=True)
 
     async def evaluate(self, lua_expression: str) -> str:
