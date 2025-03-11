@@ -711,82 +711,51 @@ class BluetoothTCP:
             except Exception as e:
                 raise Exception(f"Not connected and failed to reconnect: {e}")
         
-        # Use the built-in prntLng function to handle large scripts
-        # We'll first check if the function exists
-        check_result = await self.send_lua("if type(prntLng) == 'function' then return true else return false end", 
-                                        await_print=True, timeout=timeout)
+        # Use a very small, safe chunk size
+        chunk_size = 12  # Ultra conservative chunk size for small MTU
         
-        func_exists = check_result and "true" in check_result.lower()
-        
-        if not func_exists:
-            self.logger.info(f"[OUTGOING] {timestamp} - prntLng function not found, injecting it")
+        # For small MTU environment, write directly to a file and require it
+        # This avoids the complexity of chunking the Lua script
+        try:
+            from uuid import uuid4
+            random_name = str(uuid4())[:8]  # Use a UUID for unique file name
             
-            # Use a very conservative chunk size (16 bytes) to ensure compatibility
-            # with a variety of MTU configurations
-            chunk_size = 16
+            # Create a temporary file with our Lua code
+            # First create an empty file
+            await self._transmit(f"file = frame.file.open('/{random_name}.lua', 'write')".encode())
+            await asyncio.sleep(0.1)
             
-            prntLng_function = f"""
-            function prntLng(stringToPrint)
-                local len = string.len(stringToPrint)
-                local mtu = {chunk_size}  -- Use a conservative 16-byte chunk size
-                if len < mtu then
-                    print(stringToPrint)
-                    return
-                end
-                local i = 1
-                local chunkIndex = 0
-                while i <= len do
-                    local j = i + mtu - 4
-                    if j > len then
-                        j = len
-                    end
-                    local chunk = string.sub(stringToPrint, i, j)
-                    print('\\x0A'..chunk)
-                    chunkIndex = chunkIndex + 1
-                    i = j + 1
-                    -- Add a small delay to avoid overwhelming the device
-                    frame.delay(0.01)
-                end
-                print('\\x0B'..chunkIndex)
-            end
-            """
+            # Write the file content in small chunks
+            for i in range(0, len(string), chunk_size):
+                chunk = string[i:i+chunk_size].replace('\\', '\\\\').replace("'", "\\'")
+                write_cmd = f"file:write('{chunk}')"
+                await self._transmit(write_cmd.encode())
+                await asyncio.sleep(0.1)
             
-            # Break the function definition into smaller pieces if needed
-            if len(prntLng_function) > self._max_payload_size:
-                self.logger.warning(f"[OUTGOING] {timestamp} - Function definition exceeds payload size, sending in parts")
-                # Send in 30-byte chunks to be ultra safe
-                for i in range(0, len(prntLng_function), 30):
-                    chunk = prntLng_function[i:i+30]
-                    await self.send_lua(chunk, await_print=False, timeout=timeout)
-                    await asyncio.sleep(0.1)  # Give the device time to process
+            # Close the file
+            await self._transmit("file:close()".encode())
+            await asyncio.sleep(0.1)
+            
+            # Execute the file with require
+            if await_print:
+                self._print_response_event.clear()
+                await self._transmit(f"require('{random_name}')".encode())
+                result = await self.wait_for_print(timeout)
+                
+                # Clean up
+                await self._transmit(f"frame.file.remove('/{random_name}.lua')".encode())
+                return result
             else:
-                await self.send_lua(prntLng_function, await_print=False, timeout=timeout)
-        
-        # Now use the prntLng function to send the large script
-        if await_print:
-            self._print_response_event.clear()
-        
-        # Use triple equals to avoid any Lua string escaping issues
-        send_command = f"prntLng([===[{string}]===])"
-        
-        # Break the command into chunks if it's too long
-        if len(send_command) > self._max_payload_size:
-            self.logger.warning(f"[OUTGOING] {timestamp} - Command exceeds payload size, sending in parts")
-            for i in range(0, len(send_command), 30):
-                chunk = send_command[i:i+30]
-                await self.send_lua(chunk, await_print=False, timeout=timeout)
-                await asyncio.sleep(0.1)  # Give the device time to process
-        else:
-            await self.send_lua(send_command, await_print=False, timeout=timeout)
-        
-        if await_print:
-            try:
-                return await self.wait_for_print(timeout)
-            except Exception as e:
-                self.logger.error(f"[OUTGOING] {timestamp} - Error waiting for print response: {e}")
-                return f"Error: {str(e)}"
-        return None
-        
+                await self._transmit(f"require('{random_name}')".encode())
+                # Clean up
+                await asyncio.sleep(0.5)  # Give it time to execute
+                await self._transmit(f"frame.file.remove('/{random_name}.lua')".encode())
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"[OUTGOING] {timestamp} - Error in chunked lua transmission: {e}")
+            raise e
+
     async def send_chunked_data(self, data: bytearray, chunk_size: Optional[int] = None) -> None:
         """Send data in chunks for large payloads.
         
