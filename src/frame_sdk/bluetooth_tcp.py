@@ -83,7 +83,7 @@ class BluetoothTCP:
         command += connection_handle.to_bytes(2, 'little')  # Connection handle
         command += max_tx_octets.to_bytes(2, 'little')      # Max TX octets
         command += max_tx_time.to_bytes(2, 'little')        # Max TX time
-        await self._transmit(command)                       # Send to bridge
+        await self._transmit(command, raw=True)                       # Send to bridge
     
     async def connect(
         self, print_debugging: bool = False, default_timeout: float = 10.0
