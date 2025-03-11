@@ -19,7 +19,7 @@ class Frame:
 
     def __init__(self, host: str = "localhost", port: int = 8011, 
                 keep_alive: bool = True, keep_alive_interval: float = 30.0,
-                log_level: int = logging.INFO):
+                log_level: int = logging.INFO, mtu_size: int = 185):
         """Initialize the Frame device and its components.
         
         Args:
@@ -29,6 +29,7 @@ class Frame:
             keep_alive_interval (float): The interval in seconds between keep-alive pings.
             log_level (int): The logging level to use. Defaults to logging.INFO.
                              Can be set to logging.DEBUG for more verbose output.
+            mtu_size (int): The MTU size to negotiate with the device. Defaults to 185 bytes.
         """
         self.bluetooth = BluetoothTCP(host, port)
         # Configure the logging level
@@ -44,6 +45,7 @@ class Frame:
         self._keep_alive = keep_alive
         self._keep_alive_interval = keep_alive_interval
         self._keep_alive_task = None
+        self._mtu_size = mtu_size
         
     async def __aenter__(self) -> 'Frame':
         """Enter the asynchronous context manager."""
@@ -64,13 +66,19 @@ class Frame:
             await self.bluetooth.disconnect()
         
     async def ensure_connected(self) -> None:
-        """Ensure the Frame is connected, establishing a connection if not."""
+        """Ensure that we have an active connection to the device.
+        
+        Raises:
+            Exception: If connection fails
+        """
         if not self.bluetooth.is_connected():
-            await self.bluetooth.connect(print_debugging=Frame.debug_on_new_connection, 
-                                        default_timeout=self.bluetooth.default_timeout)
-            
-            # Start keep-alive if enabled
-            if self._keep_alive and self._keep_alive_task is None:
+            # Connect to the device
+            await self.bluetooth.connect(
+                print_debugging=Frame.debug_on_new_connection,
+                mtu_size=self._mtu_size
+            )
+            # Start the keep-alive task if enabled
+            if self._keep_alive and not self._keep_alive_task:
                 self._keep_alive_task = self.bluetooth.start_keep_alive(self._keep_alive_interval)
                 
             await self.bluetooth.send_break_signal()
@@ -276,31 +284,19 @@ class Frame:
         return string.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t").replace("\"", "\\\"").replace("[", "[").replace("]", "]")
     
     async def run_on_wake(self, lua_script: Optional[str] = None, callback: Optional[Callable[[], None ]] = None) -> None:
-        """
-        Runs a Lua function when the device wakes up from sleep.  Can include lua code to be run on Frame upon wake and/or a python callback to be run locally upon wake.
-        """
-        self._lua_on_wake = lua_script
-        self._callback_on_wake = callback
-
-        if callback is not None:
-            self.bluetooth.register_data_response_handler(FrameDataTypePrefixes.WAKE, lambda data: callback())
-        else:
-            self.bluetooth.register_data_response_handler(FrameDataTypePrefixes.WAKE, None)
-        
-        if lua_script is not None and callback is not None:
-            await self.files.write_file("main.lua",("is_awake=true;frame.bluetooth.send('\\x"+FrameDataTypePrefixes.WAKE.value_as_hex+"');\n"+lua_script).encode(), checked=True)
-        elif lua_script is None and callback is not None:
-            await self.files.write_file("main.lua",("is_awake=true;frame.bluetooth.send('\\x"+FrameDataTypePrefixes.WAKE.value_as_hex+"')").encode(), checked=True)
-        elif lua_script is not None and callback is None:
-            await self.files.write_file("main.lua",("is_awake=true;"+lua_script).encode(), checked=True)
-        else:
-            await self.files.write_file("main.lua",b"is_awake=true", checked=True)
-
-    def set_log_level(self, level: int) -> None:
-        """Set the logging level for the Frame SDK.
+        """Set a Lua script to run when the device wakes up from sleep mode.
         
         Args:
-            level (int): The logging level to set. Use constants from the logging module,
-                        such as logging.DEBUG, logging.INFO, logging.WARNING, etc.
+            lua_script (Optional[str]): The Lua script to run
+            callback (Optional[Callable[[], None]]): A callback to call when the device wakes up
         """
-        self.bluetooth.logger.setLevel(level)
+        await self.ensure_connected()
+        self._lua_on_wake = lua_script
+        self._callback_on_wake = callback
+        
+        if lua_script is not None:
+            # Create a main.lua file with an is_awake variable
+            await self.files.write_file("main.lua", b"is_awake=true", checked=True)
+        else:
+            await self.files.write_file("main.lua", b"is_awake=true", checked=True)
+∫

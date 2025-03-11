@@ -18,13 +18,16 @@ async def main():
     # logging.getLogger('frame_sdk').setLevel(logging.DEBUG)
     
     print("Connecting to Frame device via Bluetooth TCP...")
-    print("You can change log level in Frame initialization for more or less detailed logs")
+    print("Using explicit MTU size of 185 bytes for better performance")
     
     # Connect to a Frame device over Bluetooth TCP at localhost:5555
     # Use log_level=logging.DEBUG for more verbose logs
-    async with Frame(host="localhost", port=5555, log_level=logging.INFO) as frame:
+    # Set MTU size to 185 bytes (optimal for Frame devices)
+    async with Frame(host="localhost", port=5555, log_level=logging.INFO, mtu_size=185) as frame:
 
         print("Connected to Frame device! -- Running example code...")
+        print(f"Using MTU size: {frame.bluetooth._detected_mtu} bytes")
+        print(f"Max payload size: {frame.bluetooth._max_payload_size} bytes")
         
         # Get the battery level
         battery_level = await frame.get_battery_level()
@@ -47,7 +50,7 @@ async def main():
         
         # Send some data to demonstrate data logging
         print("Sending some binary data...")
-        test_data = bytearray([0x01, 0x02, 0x03, 0x04, 0x05])
+        test_data = bytearray([0x01, 0x02, 0x03, 0x04, 0x05] * 20)  # 100 bytes
         await frame.bluetooth.send_data(test_data)
         
         print("Example completed successfully!")

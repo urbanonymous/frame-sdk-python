@@ -17,6 +17,109 @@ pkg install ffmpeg
 
 This is required for the pydub library to play audio through the Microphone class.
 
+## Logging Features
+
+The SDK includes enhanced logging capabilities to help debug your applications and monitor communication with the Frame device:
+
+### Configuring Log Level
+
+You can configure the log level when creating a Frame instance:
+
+```python
+import logging
+from frame_sdk import Frame
+
+# Use DEBUG level for more verbose logging
+frame = Frame(log_level=logging.DEBUG)
+
+# Or use INFO level for standard logging (default)
+frame = Frame(log_level=logging.INFO)
+```
+
+### Changing Log Level Dynamically
+
+You can change the log level at runtime:
+
+```python
+# Switch to debug level for more detailed logs
+frame.set_log_level(logging.DEBUG)
+
+# Switch back to info level
+frame.set_log_level(logging.INFO)
+```
+
+### Available Log Levels
+
+- `logging.DEBUG`: Shows all messages, including detailed data content
+- `logging.INFO`: Shows normal operation messages (default)
+- `logging.WARNING`: Shows only warnings and errors
+- `logging.ERROR`: Shows only errors
+
+### What Gets Logged
+
+The logging system captures:
+
+- All data sent to and received from the Frame device
+- Protocol details and message types
+- MTU (Maximum Transmission Unit) size detection
+- Chunking of large messages
+- Connection status and reconnection attempts
+
+### Example Logging Output
+
+```
+2025-03-11 17:34:06,913 - frame_sdk.bluetooth_tcp - INFO - [OUTGOING] 2025-03-11 17:34:06.913 - Sending Lua script, length: 41 chars, await_print: True
+2025-03-11 17:34:06,915 - frame_sdk.bluetooth_tcp - INFO - [OUTGOING] 2025-03-11 17:34:06.915 - Sending 41 bytes of data
+2025-03-11 17:34:06,915 - frame_sdk.bluetooth_tcp - INFO - [OUTGOING] 2025-03-11 17:34:06.915 - Successfully sent 41 bytes
+2025-03-11 17:34:06,916 - frame_sdk.bluetooth_tcp - INFO - [INCOMING] 2025-03-11 17:34:06.916 - Waiting for print response, timeout: 10.0
+```
+
+### Logging Demo
+
+Check out the `examples/logging_demo.py` for a comprehensive demonstration of the logging features.
+
+## MTU Negotiation
+
+The SDK now supports explicit MTU (Maximum Transmission Unit) negotiation with the Frame device, which improves data transfer reliability and performance.
+
+### Configuring MTU Size
+
+You can set the desired MTU size when creating a Frame instance:
+
+```python
+from frame_sdk import Frame
+
+# Use the recommended MTU size of 185 bytes (default)
+frame = Frame(mtu_size=185)
+
+# Or use a custom MTU size if needed
+frame = Frame(mtu_size=100)
+```
+
+### Why MTU Size Matters
+
+- **Larger MTU**: Allows sending more data in each packet, improving performance
+- **Optimal Size**: The recommended MTU size for Frame devices is 185 bytes
+- **Too Small**: May cause excessive fragmentation and slower performance
+- **Too Large**: May cause data corruption or transmission failures
+
+### MTU Negotiation Protocol
+
+The SDK uses the following format to negotiate the MTU size:
+
+```
+0x02 + MTU_SIZE (little-endian, 2 bytes)
+```
+
+For the default 185 bytes MTU, this would be:
+```
+0x02 0xB9 0x00
+```
+
+### MTU Demo
+
+Check out the `examples/logging_demo.py` script which includes MTU negotiation features and can be configured with the `--mtu` parameter.
+
 ## Documentation
 
 Check out [the docs](https://docs.brilliant.xyz/frame/building-apps/) for complete guidance on everything you can do with the Frame.

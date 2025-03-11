@@ -67,6 +67,7 @@ class BluetoothTCP:
         self._max_payload_size = 20  # Configurable, no strict MTU in TCP
         self._auto_reconnect = True
         self._last_activity_time = 0
+        self._detected_mtu = None  # Added for MTU detection
         
         # Setup logging
         self.logger = logging.getLogger('frame_sdk.bluetooth_tcp')
@@ -77,39 +78,92 @@ class BluetoothTCP:
             self.logger.addHandler(handler)
             self.logger.setLevel(logging.INFO)
 
-    async def negotiate_mtu(self, connection_handle: int, max_tx_octets: int, max_tx_time: int):
-        """Send the LE_Set_Data_Length command to negotiate a larger MTU."""
-        command = bytearray([0x22, 0x20])  # Opcode for LE_Set_Data_Length
-        command += connection_handle.to_bytes(2, 'little')  # Connection handle
-        command += max_tx_octets.to_bytes(2, 'little')      # Max TX octets
-        command += max_tx_time.to_bytes(2, 'little')        # Max TX time
-        await self._transmit(command, raw=True)                       # Send to bridge
+    async def negotiate_mtu(self, mtu_size: int = 185):
+        """Send MTU negotiation command with the specified MTU size.
+        
+        Args:
+            mtu_size (int): The desired MTU size, defaults to 185 bytes
+        """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self.logger.info(f"[OUTGOING] {timestamp} - Negotiating MTU size to {mtu_size} bytes")
+        
+        # Format MTU command: 0x02 followed by MTU in little-endian format
+        command = bytearray([0x02])
+        command += mtu_size.to_bytes(2, 'little')  # Little-endian format (LSB first)
+        
+        # For a 185 MTU, this would be: 0x02 0xB9 0x00
+        if self._print_debugging:
+            self.logger.debug(f"[OUTGOING] {timestamp} - MTU negotiation command: {' '.join([f'{b:02X}' for b in command])}")
+        
+        # Set our internal MTU size expectation
+        self._detected_mtu = mtu_size
+        
+        # For Frame MTU of 185, use a 3-byte overhead (header, checksum, etc.)
+        # This gives us a payload size of 182 bytes for an MTU of 185
+        self._max_payload_size = mtu_size - 3
+        
+        self.logger.info(f"[OUTGOING] {timestamp} - MTU set to {mtu_size}, max payload size set to {self._max_payload_size} bytes")
+        
+        # Send the raw command
+        try:
+            await self._transmit(command, raw=True)
+            self.logger.info(f"[OUTGOING] {timestamp} - MTU negotiation request sent successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"[OUTGOING] {timestamp} - Failed to negotiate MTU: {e}")
+            return False
     
     async def connect(
-        self, print_debugging: bool = False, default_timeout: float = 10.0
+        self, print_debugging: bool = False, default_timeout: float = 10.0, mtu_size: int = 185
     ):
         """Connect to the TCP bridge.
         
         Args:
-            print_debugging (bool): Whether to print debugging information
-            default_timeout (float): Default timeout for operations in seconds
-        
+            print_debugging (bool): Whether to print debug information
+            default_timeout (float): Default timeout in seconds for operations
+            mtu_size (int): MTU size to negotiate, defaults to 185 bytes
+            
         Raises:
-            Exception: If connection fails
+            Exception: On connection failure
         """
+        if self._connected:
+            return  # Already connected
+            
         self._print_debugging = print_debugging
         self._default_timeout = default_timeout
+        self._detected_mtu = None  # Reset MTU detection on new connection
+        
         try:
             self._reader, self._writer = await asyncio.open_connection(
                 self.host, self.port
             )
             self._connected = True
-            self._last_activity_time = asyncio.get_event_loop().time()
+            print(f"Connected to {self.host}:{self.port}")
+            
+            # Reset all response states
+            self._last_print_response = ""
+            self._ongoing_print_response = None
+            self._ongoing_print_response_chunk_count = None
+            self._print_response_event.clear()
+            
+            self._last_data_response = bytes()
+            self._ongoing_data_response = None
+            self._ongoing_data_response_chunk_count = None
+            self._data_response_event.clear()
+            
+            # Start the read loop
             asyncio.create_task(self._read_loop())
-            await self.negotiate_mtu(0x0004, 251, 2120)
-            if self._print_debugging:
-                print(f"Connected to {self.host}:{self.port}")
+            
+            # Update activity timestamp
+            self._last_activity_time = asyncio.get_event_loop().time()
+            
+            # Negotiate MTU size
+            await self.negotiate_mtu(mtu_size)
+            
+            # Send a wake signal to initialize connection
+            await self.send_reset_signal()
         except Exception as e:
+            self._connected = False
             raise Exception(f"Failed to connect to {self.host}:{self.port}: {e}")
 
     @property
@@ -229,6 +283,16 @@ class BluetoothTCP:
                     if self._auto_reconnect:
                         asyncio.create_task(self._delayed_reconnect())
                     break
+                
+                # Log information about received data size
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                if len(data) > 0:
+                    self.logger.debug(f"[INCOMING] {timestamp} - Received {len(data)} bytes of data")
+                    
+                    # If somehow the data exceeds our expected MTU, log a warning
+                    # This could indicate an MTU mismatch
+                    if self._detected_mtu is not None and len(data) > self._detected_mtu:
+                        self.logger.warning(f"[INCOMING] {timestamp} - Received {len(data)} bytes, which exceeds negotiated MTU of {self._detected_mtu}")
                 
                 # Print raw data for debugging
                 if self._print_debugging:
