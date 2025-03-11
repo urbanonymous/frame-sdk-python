@@ -644,21 +644,97 @@ class BluetoothTCP:
             return await self.wait_for_data(timeout)
         return None
 
-    async def send_chunked_data(self, data: bytearray, chunk_size: Optional[int] = None) -> None:
-        """Send large data in chunks to the device.
+    async def send_chunked_lua(
+        self, string: str, await_print: bool = False, timeout: Optional[float] = None
+    ) -> Optional[str]:
+        """Send a Lua script in chunks to handle larger scripts.
         
-        This method breaks up large data into manageable chunks for transmission.
+        Args:
+            string (str): The Lua script to send
+            await_print (bool): Whether to wait for and return the print response
+            timeout (Optional[float]): The timeout in seconds
+            
+        Returns:
+            Optional[str]: The print response if await_print is True
+        """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self.logger.info(f"[OUTGOING] {timestamp} - Sending chunked Lua script, total length: {len(string)} chars")
+        
+        if not self.is_connected():
+            try:
+                await self.reconnect()
+            except Exception as e:
+                raise Exception(f"Not connected and failed to reconnect: {e}")
+        
+        # Use the built-in prntLng function to handle large scripts
+        # We'll first check if the function exists
+        check_result = await self.send_lua("if type(prntLng) == 'function' then return true else return false end", 
+                                        await_print=True, timeout=timeout)
+        
+        func_exists = check_result and "true" in check_result.lower()
+        
+        if not func_exists:
+            self.logger.info(f"[OUTGOING] {timestamp} - prntLng function not found, injecting it")
+            # Inject the prntLng function for handling large strings
+            # Use most of our available MTU for the chunk size to minimize chunks
+            chunk_size = self._max_payload_size - 10  # Allow for some overhead
+            
+            prntLng_function = f"""
+            function prntLng(stringToPrint)
+                local len = string.len(stringToPrint)
+                local mtu = {chunk_size}  # Use {chunk_size} bytes based on our MTU of {self._detected_mtu}
+                if len < mtu then
+                    print(stringToPrint)
+                    return
+                end
+                local i = 1
+                local chunkIndex = 0
+                while i <= len do
+                    local j = i + mtu - 4
+                    if j > len then
+                        j = len
+                    end
+                    local chunk = string.sub(stringToPrint, i, j)
+                    print('\\x0A'..chunk)
+                    chunkIndex = chunkIndex + 1
+                    i = j + 1
+                end
+                print('\\x0B'..chunkIndex)
+            end
+            """
+            await self.send_lua(prntLng_function, await_print=False, timeout=timeout)
+        
+        # Now use the prntLng function to send the large script
+        # We'll wrap the script in a function to avoid execution issues
+        if await_print:
+            self._print_response_event.clear()
+        
+        send_command = f"prntLng([===[{string}]===])"
+        await self.send_lua(send_command, await_print=False, timeout=timeout)
+        
+        if await_print:
+            return await self.wait_for_print(timeout)
+        return None
+        
+    async def send_chunked_data(self, data: bytearray, chunk_size: Optional[int] = None) -> None:
+        """Send data in chunks for large payloads.
         
         Args:
             data (bytearray): The data to send
-            chunk_size (Optional[int]): The size of each chunk. If None, uses max_data_payload()
+            chunk_size (Optional[int]): The size of each chunk. If None, uses detected MTU size
         """
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        chunk_size = chunk_size if chunk_size is not None else self._max_payload_size - 1  # -1 for the prefix byte
+        
+        # Use a chunk size based on the negotiated MTU with a small buffer for the prefix byte
+        if chunk_size is None:
+            # Leave 2 bytes for prefix and safety margin
+            chunk_size = self._max_payload_size - 2
+        
         total_size = len(data)
         num_chunks = (total_size + chunk_size - 1) // chunk_size
         
-        self.logger.info(f"[OUTGOING] {timestamp} - Sending chunked data: total {total_size} bytes in {num_chunks} chunks")
+        self.logger.info(f"[OUTGOING] {timestamp} - Sending chunked data: total {total_size} bytes in {num_chunks} chunks of {chunk_size} bytes")
+        self.logger.debug(f"[OUTGOING] {timestamp} - Using MTU size: {self._detected_mtu}, max payload: {self._max_payload_size}")
         
         if not self.is_connected():
             self.logger.warning(f"[OUTGOING] {timestamp} - Not connected, attempting to reconnect")
@@ -670,29 +746,19 @@ class BluetoothTCP:
 
         # Break into chunks
         chunks = [data[i:i+chunk_size] for i in range(0, len(data), chunk_size)]
-        chunk_count = len(chunks)
         
-        if self._print_debugging:
-            print(f">> Sending {len(data)} bytes in {chunk_count} chunks")
-            
         # Send each chunk with the LONG_DATA prefix
         for i, chunk in enumerate(chunks):
-            if self._print_debugging:
-                print(f"Sending chunk {i+1}/{chunk_count}, {len(chunk)} bytes")
+            prefix = FrameDataTypePrefixes.LONG_DATA.value
+            if i == len(chunks) - 1:  # Last chunk
+                prefix = FrameDataTypePrefixes.LONG_DATA_END.value
                 
-            # First byte is data prefix, second is LONG_DATA type
-            prefix = bytearray([_FRAME_DATA_PREFIX, FrameDataTypePrefixes.LONG_DATA.value])
-            await self._transmit(prefix + chunk)
+            await self._transmit(bytearray([prefix]) + chunk)
             
-            # Brief pause to prevent overwhelming the device
+            # Small delay between chunks to prevent overwhelming the device
             await asyncio.sleep(0.01)
             
-        # Send the end marker with chunk count
-        end_prefix = bytearray([_FRAME_DATA_PREFIX, FrameDataTypePrefixes.LONG_DATA_END.value])
-        await self._transmit(end_prefix + str(chunk_count).encode())
-        
-        if self._print_debugging:
-            print(f"Finished sending chunked data")
+        self.logger.info(f"[OUTGOING] {timestamp} - Successfully sent {len(chunks)} chunks")
 
     async def send_reset_signal(self):
         if not self.is_connected():

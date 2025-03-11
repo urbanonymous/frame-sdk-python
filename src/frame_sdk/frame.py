@@ -294,9 +294,26 @@ class Frame:
         self._lua_on_wake = lua_script
         self._callback_on_wake = callback
         
-        if lua_script is not None:
-            # Create a main.lua file with an is_awake variable
-            await self.files.write_file("main.lua", b"is_awake=true", checked=True)
+        # Register the callback handler if provided
+        if callback is not None:
+            self.bluetooth.register_data_response_handler(FrameDataTypePrefixes.WAKE, lambda data: callback())
         else:
+            self.bluetooth.register_data_response_handler(FrameDataTypePrefixes.WAKE, None)
+            
+        # Create the main.lua file with appropriate content
+        if lua_script is not None and callback is not None:
+            # Both lua script and callback
+            main_lua = f"is_awake=true;frame.bluetooth.send('\\x{FrameDataTypePrefixes.WAKE.value_as_hex}');\n{lua_script}"
+            await self.files.write_file("main.lua", main_lua.encode(), checked=True)
+        elif lua_script is None and callback is not None:
+            # Only callback, no lua script
+            main_lua = f"is_awake=true;frame.bluetooth.send('\\x{FrameDataTypePrefixes.WAKE.value_as_hex}')"
+            await self.files.write_file("main.lua", main_lua.encode(), checked=True)
+        elif lua_script is not None and callback is None:
+            # Only lua script, no callback
+            main_lua = f"is_awake=true;{lua_script}"
+            await self.files.write_file("main.lua", main_lua.encode(), checked=True)
+        else:
+            # Neither lua script nor callback
             await self.files.write_file("main.lua", b"is_awake=true", checked=True)
 ∫
