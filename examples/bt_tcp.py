@@ -1,14 +1,28 @@
 import asyncio
 import sys
 import os
+import logging
 
 # Add the src directory to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.frame_sdk import Frame
 
 async def main():
+    # Configure logging (optional)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # For more detailed logging, uncomment the line below
+    # logging.getLogger('frame_sdk').setLevel(logging.DEBUG)
+    
+    print("Connecting to Frame device via Bluetooth TCP...")
+    print("You can change log level in Frame initialization for more or less detailed logs")
+    
     # Connect to a Frame device over Bluetooth TCP at localhost:5555
-    async with Frame(host="localhost", port=5555) as frame:
+    # Use log_level=logging.DEBUG for more verbose logs
+    async with Frame(host="localhost", port=5555, log_level=logging.INFO) as frame:
 
         print("Connected to Frame device! -- Running example code...")
         
@@ -31,11 +45,12 @@ async def main():
         display.flush()
         ''')
         
-        # Wait a moment
-        print("Waiting for 2 seconds...")
-        await frame.delay(2)
+        # Send some data to demonstrate data logging
+        print("Sending some binary data...")
+        test_data = bytearray([0x01, 0x02, 0x03, 0x04, 0x05])
+        await frame.bluetooth.send_data(test_data)
         
-        print("Example completed!")
+        print("Example completed successfully!")
 
 if __name__ == "__main__":
     try:

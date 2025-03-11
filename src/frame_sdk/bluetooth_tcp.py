@@ -1,6 +1,9 @@
 import asyncio
 from typing import Optional, Callable, Dict
 from enum import Enum
+import time
+import logging
+import datetime
 
 _FRAME_DATA_PREFIX = 1
 
@@ -64,6 +67,15 @@ class BluetoothTCP:
         self._max_payload_size = 512  # Configurable, no strict MTU in TCP
         self._auto_reconnect = True
         self._last_activity_time = 0
+        
+        # Setup logging
+        self.logger = logging.getLogger('frame_sdk.bluetooth_tcp')
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
 
     async def connect(
         self, print_debugging: bool = False, default_timeout: float = 10.0
@@ -234,7 +246,18 @@ class BluetoothTCP:
 
     async def _notification_handler(self, data: bytearray):
         # If the first byte is in our protocol range (0x01-0x0B), treat as protocol message
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         if data and data[0] <= 0x0B:
+            prefix_type = None
+            try:
+                prefix_type = FrameDataTypePrefixes(data[0])
+                self.logger.info(f"[INCOMING] {timestamp} - Received {len(data)} bytes with prefix: {prefix_type.name}")
+                if self._print_debugging:
+                    self.logger.debug(f"[INCOMING] {timestamp} - Raw data: {' '.join([f'{b:02X}' for b in data[:20]])}" + 
+                             ('...' if len(data) > 20 else ''))
+            except ValueError:
+                self.logger.warning(f"[INCOMING] {timestamp} - Received data with unknown prefix: 0x{data[0]:02X}")
+            
             if data[0] == FrameDataTypePrefixes.LONG_TEXT.value:
                 if (
                     self._ongoing_print_response is None
@@ -242,21 +265,23 @@ class BluetoothTCP:
                 ):
                     self._ongoing_print_response = bytearray()
                     self._ongoing_print_response_chunk_count = 0
-                    if self._print_debugging:
-                        print("Starting receiving new long printed string")
+                    self.logger.info(f"[INCOMING] {timestamp} - Starting to receive new long printed string")
                 self._ongoing_print_response += data[1:]
                 self._ongoing_print_response_chunk_count += 1
+                
                 if self._print_debugging:
-                    print(
-                        f"Received chunk #{self._ongoing_print_response_chunk_count}: {data[1:].decode()}"
+                    chunk_data = data[1:].decode(errors='replace')
+                    self.logger.debug(
+                        f"[INCOMING] {timestamp} - Received chunk #{self._ongoing_print_response_chunk_count}: {chunk_data}"
                     )
                 if len(self._ongoing_print_response) > self._max_receive_buffer:
+                    self.logger.error(f"[INCOMING] {timestamp} - Buffer overflow: long printed string exceeds {self._max_receive_buffer} bytes")
                     raise Exception(
                         f"Buffered long printed string exceeds {self._max_receive_buffer} bytes"
                     )
 
             elif data[0] == FrameDataTypePrefixes.LONG_TEXT_END.value:
-                total_expected_chunk_count = int(data[1:].decode()) if data[1:] else 0
+                total_expected_chunk_count = int(data[1:].decode(errors='replace')) if data[1:] else 0
                 if self._print_debugging:
                     print(
                         f"Received final string chunk count: {total_expected_chunk_count}"
@@ -354,14 +379,31 @@ class BluetoothTCP:
         Raises:
             Exception: If not connected or the payload is too large
         """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        
+        # Determine data type based on first byte if available
+        prefix_type = None
+        if data and data[0] <= 0x0B:
+            try:
+                prefix_type = FrameDataTypePrefixes(data[0])
+                self.logger.info(f"[OUTGOING] {timestamp} - Sending {len(data)} bytes with prefix: {prefix_type.name}")
+            except ValueError:
+                # Not a known prefix or not a protocol message
+                pass
+        else:
+            # For regular data without a prefix
+            self.logger.info(f"[OUTGOING] {timestamp} - Sending {len(data)} bytes of data")
+        
         if self._print_debugging:
-            print(f"Sending {len(data)} bytes: {' '.join([f'{b:02X}' for b in data[:10]])}" + 
-                  ('...' if len(data) > 10 else ''))
+            self.logger.debug(f"[OUTGOING] {timestamp} - Raw data: {' '.join([f'{b:02X}' for b in data[:20]])}" + 
+                  ('...' if len(data) > 20 else ''))
             
         if not self._connected:
+            self.logger.error(f"[OUTGOING] {timestamp} - Failed to send: not connected")
             raise Exception("Not connected")
             
         if len(data) > self._max_payload_size:
+            self.logger.error(f"[OUTGOING] {timestamp} - Payload too large: {len(data)} > {self._max_payload_size}")
             raise Exception(
                 f"Payload too large: {len(data)} > {self._max_payload_size}. Use send_chunked_data for large payloads."
             )
@@ -372,13 +414,15 @@ class BluetoothTCP:
             await self._writer.drain()
             # Update activity timestamp on successful write
             self._last_activity_time = asyncio.get_event_loop().time()
+            self.logger.info(f"[OUTGOING] {timestamp} - Successfully sent {len(data)} bytes")
         except ConnectionError as e:
             self._connected = False
+            self.logger.error(f"[OUTGOING] {timestamp} - Connection lost during transmission: {e}")
             self._user_disconnect_handler()
             raise Exception(f"Connection lost during transmission: {e}")
         except Exception as e:
+            self.logger.error(f"[OUTGOING] {timestamp} - Transmission error: {e}")
             print(f"Transmission error: {e}")
-            raise Exception(f"Failed to transmit data: {e}")
 
     def register_data_response_handler(
         self,
@@ -447,24 +491,34 @@ class BluetoothTCP:
     async def send_lua(
         self, string: str, await_print: bool = False, timeout: Optional[float] = None
     ) -> Optional[str]:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self.logger.info(f"[OUTGOING] {timestamp} - Sending Lua script, length: {len(string)} chars, await_print: {await_print}")
+        
         if not self.is_connected():
+            self.logger.warning(f"[OUTGOING] {timestamp} - Not connected, attempting to reconnect")
             try:
                 await self.reconnect()
             except Exception as e:
+                self.logger.error(f"[OUTGOING] {timestamp} - Failed to reconnect: {e}")
                 raise Exception(f"Not connected and failed to reconnect: {e}")
                 
         if await_print:
             self._print_response_event.clear()
         await self._transmit(string.encode())
         if await_print:
+            self.logger.info(f"[OUTGOING] {timestamp} - Waiting for print response, timeout: {timeout if timeout is not None else self._default_timeout}")
             return await self.wait_for_print(timeout)
         return None
 
     async def wait_for_print(self, timeout: Optional[float] = None) -> str:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         timeout = timeout if timeout is not None else self._default_timeout
         try:
+            self.logger.info(f"[INCOMING] {timestamp} - Waiting for print response, timeout: {timeout}")
             await asyncio.wait_for(self._print_response_event.wait(), timeout)
+            self.logger.info(f"[INCOMING] {timestamp} - Received print response, length: {len(self._last_print_response)} chars")
         except asyncio.TimeoutError:
+            self.logger.error(f"[INCOMING] {timestamp} - No print response within {timeout} seconds")
             raise Exception(f"No print response within {timeout} seconds")
         self._print_response_event.clear()
         return self._last_print_response
@@ -498,16 +552,22 @@ class BluetoothTCP:
     async def send_data(
         self, data: bytearray, await_data: bool = False, timeout: Optional[float] = None
     ) -> Optional[bytes]:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        self.logger.info(f"[OUTGOING] {timestamp} - Sending data, length: {len(data)} bytes, await_data: {await_data}")
+        
         if not self.is_connected():
+            self.logger.warning(f"[OUTGOING] {timestamp} - Not connected, attempting to reconnect")
             try:
                 await self.reconnect()
             except Exception as e:
+                self.logger.error(f"[OUTGOING] {timestamp} - Failed to reconnect: {e}")
                 raise Exception(f"Not connected and failed to reconnect: {e}")
                 
         if await_data:
             self._data_response_event.clear()
-        await self._transmit(bytearray(b"\x01") + data)
+        await self._transmit(data)
         if await_data:
+            self.logger.info(f"[OUTGOING] {timestamp} - Waiting for data response, timeout: {timeout if timeout is not None else self._default_timeout}")
             return await self.wait_for_data(timeout)
         return None
 
@@ -520,21 +580,21 @@ class BluetoothTCP:
             data (bytearray): The data to send
             chunk_size (Optional[int]): The size of each chunk. If None, uses max_data_payload()
         """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        chunk_size = chunk_size if chunk_size is not None else self._max_payload_size - 1  # -1 for the prefix byte
+        total_size = len(data)
+        num_chunks = (total_size + chunk_size - 1) // chunk_size
+        
+        self.logger.info(f"[OUTGOING] {timestamp} - Sending chunked data: total {total_size} bytes in {num_chunks} chunks")
+        
         if not self.is_connected():
+            self.logger.warning(f"[OUTGOING] {timestamp} - Not connected, attempting to reconnect")
             try:
                 await self.reconnect()
             except Exception as e:
+                self.logger.error(f"[OUTGOING] {timestamp} - Failed to reconnect: {e}")
                 raise Exception(f"Not connected and failed to reconnect: {e}")
-                
-        chunk_size = chunk_size or self.max_data_payload()
-        if chunk_size <= 0:
-            raise ValueError("Chunk size must be positive")
-            
-        if len(data) <= chunk_size:
-            # Small enough to send in one go
-            await self.send_data(data)
-            return
-            
+
         # Break into chunks
         chunks = [data[i:i+chunk_size] for i in range(0, len(data), chunk_size)]
         chunk_count = len(chunks)

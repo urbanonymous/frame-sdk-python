@@ -10,6 +10,7 @@ from .motion import Motion
 import random
 import re
 import time
+import logging
 
 class Frame:
     """Represents a Frame device. Instantiate this class via `async with Frame() as f:`."""
@@ -17,7 +18,8 @@ class Frame:
     debug_on_new_connection: bool = True
 
     def __init__(self, host: str = "localhost", port: int = 8011, 
-                keep_alive: bool = True, keep_alive_interval: float = 30.0):
+                keep_alive: bool = True, keep_alive_interval: float = 30.0,
+                log_level: int = logging.INFO):
         """Initialize the Frame device and its components.
         
         Args:
@@ -25,8 +27,13 @@ class Frame:
             port (int): The port number of the Bluetooth-TCP bridge. Defaults to 8011.
             keep_alive (bool): Whether to enable keep-alive functionality to maintain the connection.
             keep_alive_interval (float): The interval in seconds between keep-alive pings.
+            log_level (int): The logging level to use. Defaults to logging.INFO.
+                             Can be set to logging.DEBUG for more verbose output.
         """
         self.bluetooth = BluetoothTCP(host, port)
+        # Configure the logging level
+        self.bluetooth.logger.setLevel(log_level)
+        
         self.files = Files(self)
         self.camera = Camera(self)
         self.display = Display(self)
@@ -288,3 +295,12 @@ class Frame:
             await self.files.write_file("main.lua",("is_awake=true;"+lua_script).encode(), checked=True)
         else:
             await self.files.write_file("main.lua",b"is_awake=true", checked=True)
+
+    def set_log_level(self, level: int) -> None:
+        """Set the logging level for the Frame SDK.
+        
+        Args:
+            level (int): The logging level to set. Use constants from the logging module,
+                        such as logging.DEBUG, logging.INFO, logging.WARNING, etc.
+        """
+        self.bluetooth.logger.setLevel(level)
