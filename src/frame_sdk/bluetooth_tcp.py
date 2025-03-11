@@ -64,7 +64,7 @@ class BluetoothTCP:
         self._user_data_response_handlers: Dict[
             FrameDataTypePrefixes, Callable[[bytes], None]
         ] = {}
-        self._max_payload_size = 512  # Configurable, no strict MTU in TCP
+        self._max_payload_size = 100  # Configurable, no strict MTU in TCP
         self._auto_reconnect = True
         self._last_activity_time = 0
         
@@ -379,7 +379,7 @@ class BluetoothTCP:
                 self._data_response_event.set()
                 self.call_data_response_handlers(data)
 
-    async def _transmit(self, data: bytearray):
+    async def _transmit(self, data: bytearray, raw: bool = False):
         """Send data to the device with proper error handling and reconnection logic.
         
         Args:
@@ -390,22 +390,22 @@ class BluetoothTCP:
         """
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         
-        # Determine data type based on first byte if available
-        prefix_type = None
-        if data and data[0] <= 0x0B:
-            try:
-                prefix_type = FrameDataTypePrefixes(data[0])
-                self.logger.info(f"[OUTGOING] {timestamp} - Sending {len(data)} bytes with prefix: {prefix_type.name}")
-            except ValueError:
-                # Not a known prefix or not a protocol message
-                pass
-        else:
-            # For regular data without a prefix
-            self.logger.info(f"[OUTGOING] {timestamp} - Sending {len(data)} bytes of data")
+        if not raw:
+            # Determine data type based on first byte if available
+            prefix_type = None
+            if data and data[0] <= 0x0B:
+                try:
+                    prefix_type = FrameDataTypePrefixes(data[0])
+                    self.logger.info(f"[OUTGOING] {timestamp} - Sending {len(data)} bytes with prefix: {prefix_type.name}")
+                except ValueError:
+                    # Not a known prefix or not a protocol message
+                    pass
+            else:
+                # For regular data without a prefix
+                self.logger.info(f"[OUTGOING] {timestamp} - Sending {len(data)} bytes of data")
         
         if self._print_debugging:
-            self.logger.debug(f"[OUTGOING] {timestamp} - Raw data: {' '.join([f'{b:02X}' for b in data[:20]])}" + 
-                  ('...' if len(data) > 20 else ''))
+            self.logger.debug(f"[OUTGOING] {timestamp} - Raw data: {data}")
             
         if not self._connected:
             self.logger.error(f"[OUTGOING] {timestamp} - Failed to send: not connected")
