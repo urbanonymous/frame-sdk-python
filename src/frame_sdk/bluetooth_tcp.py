@@ -77,6 +77,14 @@ class BluetoothTCP:
             self.logger.addHandler(handler)
             self.logger.setLevel(logging.INFO)
 
+    async def negotiate_mtu(self, connection_handle: int, max_tx_octets: int, max_tx_time: int):
+        """Send the LE_Set_Data_Length command to negotiate a larger MTU."""
+        command = bytearray([0x22, 0x20])  # Opcode for LE_Set_Data_Length
+        command += connection_handle.to_bytes(2, 'little')  # Connection handle
+        command += max_tx_octets.to_bytes(2, 'little')      # Max TX octets
+        command += max_tx_time.to_bytes(2, 'little')        # Max TX time
+        await self._transmit(command)                       # Send to bridge
+    
     async def connect(
         self, print_debugging: bool = False, default_timeout: float = 10.0
     ):
@@ -98,6 +106,7 @@ class BluetoothTCP:
             self._connected = True
             self._last_activity_time = asyncio.get_event_loop().time()
             asyncio.create_task(self._read_loop())
+            await self.negotiate_mtu(0x0004, 251, 2120)
             if self._print_debugging:
                 print(f"Connected to {self.host}:{self.port}")
         except Exception as e:
