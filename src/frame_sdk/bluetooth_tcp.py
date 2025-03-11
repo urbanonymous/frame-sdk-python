@@ -64,26 +64,37 @@ class BluetoothTCP:
         self._user_data_response_handlers: Dict[
             FrameDataTypePrefixes, Callable[[bytes], None]
         ] = {}
-        self._max_payload_size = 20  # Configurable, no strict MTU in TCP
+        self._max_payload_size = 20  # Default to a conservative size before negotiation
         self._auto_reconnect = True
         self._last_activity_time = 0
         self._detected_mtu = None  # Added for MTU detection
+        self._mtu_negotiation_attempted = False
+        self._mtu_negotiation_complete = False
         
-        # Setup logging
+        # Setup logging - ensure we remove all existing handlers
         self.logger = logging.getLogger('frame_sdk.bluetooth_tcp')
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
-            self.logger.setLevel(logging.INFO)
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+        
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        self.logger.setLevel(logging.INFO)
 
     async def negotiate_mtu(self, mtu_size: int = 185):
         """Send MTU negotiation command with the specified MTU size.
         
         Args:
             mtu_size (int): The desired MTU size, defaults to 185 bytes
+            
+        Returns:
+            bool: True if negotiation was attempted, False if already connected
         """
+        if self._mtu_negotiation_attempted:
+            self.logger.info(f"MTU negotiation already attempted, using current MTU: {self._detected_mtu or 'unknown'}")
+            return False
+            
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         self.logger.info(f"[OUTGOING] {timestamp} - Negotiating MTU size to {mtu_size} bytes")
         
@@ -95,7 +106,7 @@ class BluetoothTCP:
         if self._print_debugging:
             self.logger.debug(f"[OUTGOING] {timestamp} - MTU negotiation command: {' '.join([f'{b:02X}' for b in command])}")
         
-        # Set our internal MTU size expectation
+        # Set our internal MTU size expectation - be conservative initially
         self._detected_mtu = mtu_size
         
         # For Frame MTU of 185, use a 3-byte overhead (header, checksum, etc.)
@@ -108,9 +119,15 @@ class BluetoothTCP:
         try:
             await self._transmit(command, raw=True)
             self.logger.info(f"[OUTGOING] {timestamp} - MTU negotiation request sent successfully")
+            self._mtu_negotiation_attempted = True
             return True
         except Exception as e:
             self.logger.error(f"[OUTGOING] {timestamp} - Failed to negotiate MTU: {e}")
+            # Fall back to a conservative MTU size
+            self._detected_mtu = 40
+            self._max_payload_size = 32
+            self.logger.warning(f"[OUTGOING] {timestamp} - Falling back to conservative MTU size: {self._detected_mtu}")
+            self._mtu_negotiation_attempted = True
             return False
     
     async def connect(
@@ -131,7 +148,7 @@ class BluetoothTCP:
             
         self._print_debugging = print_debugging
         self._default_timeout = default_timeout
-        self._detected_mtu = None  # Reset MTU detection on new connection
+        self._mtu_negotiation_attempted = False  # Reset for new connection
         
         try:
             self._reader, self._writer = await asyncio.open_connection(
@@ -158,7 +175,9 @@ class BluetoothTCP:
             self._last_activity_time = asyncio.get_event_loop().time()
             
             # Negotiate MTU size
-            await self.negotiate_mtu(mtu_size)
+            success = await self.negotiate_mtu(mtu_size)
+            if not success:
+                self.logger.warning(f"MTU negotiation may not have succeeded, using conservative values")
             
             # Send a wake signal to initialize connection
             await self.send_reset_signal()
@@ -268,6 +287,8 @@ class BluetoothTCP:
 
     async def _read_loop(self):
         """Background task that reads data from the TCP connection."""
+        connection_stability_count = 0  # Counter for tracking connection stability
+        
         while self._connected:
             try:
                 # Try to read data in chunks
@@ -284,38 +305,62 @@ class BluetoothTCP:
                         asyncio.create_task(self._delayed_reconnect())
                     break
                 
+                # Reset connection stability counter on successful read
+                connection_stability_count = 0
+                
                 # Log information about received data size
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 if len(data) > 0:
                     self.logger.debug(f"[INCOMING] {timestamp} - Received {len(data)} bytes of data")
                     
-                    # If somehow the data exceeds our expected MTU, log a warning
-                    # This could indicate an MTU mismatch
-                    if self._detected_mtu is not None and len(data) > self._detected_mtu:
-                        self.logger.warning(f"[INCOMING] {timestamp} - Received {len(data)} bytes, which exceeds negotiated MTU of {self._detected_mtu}")
+                    # After 5 successful transmissions, observe actual data size patterns to adjust MTU if needed
+                    if not self._mtu_negotiation_complete and len(data) > 0 and len(data) < self._detected_mtu:
+                        # If we consistently see smaller packets than our negotiated MTU,
+                        # we might need to adjust our expectations
+                        self.logger.info(f"[INCOMING] {timestamp} - Detected actual packet size: {len(data)} bytes")
+                        
+                        # Update our MTU expectations if the observed size is consistently smaller
+                        if self._max_payload_size > len(data):
+                            new_payload_size = max(16, len(data) - 2)  # Be slightly conservative
+                            self.logger.warning(f"[INCOMING] {timestamp} - Adjusting max payload size to {new_payload_size} based on observed data")
+                            self._max_payload_size = new_payload_size
+                            self._detected_mtu = len(data)
+                            self._mtu_negotiation_complete = True
                 
                 # Print raw data for debugging
                 if self._print_debugging:
-                    print(f"<< Raw data received: {' '.join([f'{b:02X}' for b in data])}")
+                    try:
+                        text = data.decode('utf-8', errors='replace')
+                        print(f"<< Raw data received: {' '.join([f'{b:02X}' for b in data])}")
+                        print(f"Received raw text: {text}")
+                    except Exception:
+                        print(f"Received non-text data: {' '.join([f'{b:02X}' for b in data])}")
                 
                 # Update activity timestamp on successful read
                 self._last_activity_time = asyncio.get_event_loop().time()
                 await self._notification_handler(data)
             except (asyncio.IncompleteReadError, ConnectionError) as e:
-                print(f"Connection error: {e}")
+                self.logger.error(f"Read error: {e}")
                 self._connected = False
                 self._user_disconnect_handler()
                 if self._auto_reconnect:
                     asyncio.create_task(self._delayed_reconnect())
                 break
             except Exception as e:
-                print(f"Read loop error: {e}")
-                if self._auto_reconnect and self._connected:
-                    # Only attempt to reconnect if still marked as connected
+                # Connection is unstable, increment counter
+                connection_stability_count += 1
+                self.logger.error(f"Unexpected error in read loop: {e}")
+                
+                # If we encounter too many errors, consider reconnecting
+                if connection_stability_count > 5:
+                    self.logger.error("Too many errors in read loop, reconnecting...")
                     self._connected = False
-                    self._user_disconnect_handler()
-                    asyncio.create_task(self._delayed_reconnect())
-                break
+                    if self._auto_reconnect:
+                        asyncio.create_task(self._delayed_reconnect())
+                    break
+                    
+                # Brief pause to avoid rapid error cycles
+                await asyncio.sleep(0.5)
 
     async def _notification_handler(self, data: bytearray):
         # If the first byte is in our protocol range (0x01-0x0B), treat as protocol message
@@ -675,14 +720,15 @@ class BluetoothTCP:
         
         if not func_exists:
             self.logger.info(f"[OUTGOING] {timestamp} - prntLng function not found, injecting it")
-            # Inject the prntLng function for handling large strings
-            # Use most of our available MTU for the chunk size to minimize chunks
-            chunk_size = self._max_payload_size - 10  # Allow for some overhead
+            
+            # Use a very conservative chunk size (16 bytes) to ensure compatibility
+            # with a variety of MTU configurations
+            chunk_size = 16
             
             prntLng_function = f"""
             function prntLng(stringToPrint)
                 local len = string.len(stringToPrint)
-                local mtu = {chunk_size}  # Use {chunk_size} bytes based on our MTU of {self._detected_mtu}
+                local mtu = {chunk_size}  -- Use a conservative 16-byte chunk size
                 if len < mtu then
                     print(stringToPrint)
                     return
@@ -698,22 +744,47 @@ class BluetoothTCP:
                     print('\\x0A'..chunk)
                     chunkIndex = chunkIndex + 1
                     i = j + 1
+                    -- Add a small delay to avoid overwhelming the device
+                    frame.delay(0.01)
                 end
                 print('\\x0B'..chunkIndex)
             end
             """
-            await self.send_lua(prntLng_function, await_print=False, timeout=timeout)
+            
+            # Break the function definition into smaller pieces if needed
+            if len(prntLng_function) > self._max_payload_size:
+                self.logger.warning(f"[OUTGOING] {timestamp} - Function definition exceeds payload size, sending in parts")
+                # Send in 30-byte chunks to be ultra safe
+                for i in range(0, len(prntLng_function), 30):
+                    chunk = prntLng_function[i:i+30]
+                    await self.send_lua(chunk, await_print=False, timeout=timeout)
+                    await asyncio.sleep(0.1)  # Give the device time to process
+            else:
+                await self.send_lua(prntLng_function, await_print=False, timeout=timeout)
         
         # Now use the prntLng function to send the large script
-        # We'll wrap the script in a function to avoid execution issues
         if await_print:
             self._print_response_event.clear()
         
+        # Use triple equals to avoid any Lua string escaping issues
         send_command = f"prntLng([===[{string}]===])"
-        await self.send_lua(send_command, await_print=False, timeout=timeout)
+        
+        # Break the command into chunks if it's too long
+        if len(send_command) > self._max_payload_size:
+            self.logger.warning(f"[OUTGOING] {timestamp} - Command exceeds payload size, sending in parts")
+            for i in range(0, len(send_command), 30):
+                chunk = send_command[i:i+30]
+                await self.send_lua(chunk, await_print=False, timeout=timeout)
+                await asyncio.sleep(0.1)  # Give the device time to process
+        else:
+            await self.send_lua(send_command, await_print=False, timeout=timeout)
         
         if await_print:
-            return await self.wait_for_print(timeout)
+            try:
+                return await self.wait_for_print(timeout)
+            except Exception as e:
+                self.logger.error(f"[OUTGOING] {timestamp} - Error waiting for print response: {e}")
+                return f"Error: {str(e)}"
         return None
         
     async def send_chunked_data(self, data: bytearray, chunk_size: Optional[int] = None) -> None:
