@@ -9,7 +9,8 @@ from src.frame_sdk import Frame
 async def main():
     # Connect to a Frame device over Bluetooth TCP at localhost:5555
     async with Frame(host="localhost", port=5555) as frame:
-        print("Connected to Frame device!")
+
+        print("Connected to Frame device! -- Running example code...")
         
         # Get the battery level
         battery_level = await frame.get_battery_level()

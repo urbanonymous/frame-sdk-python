@@ -67,7 +67,7 @@ class Frame:
                 self._keep_alive_task = self.bluetooth.start_keep_alive(self._keep_alive_interval)
                 
             await self.bluetooth.send_break_signal()
-            print("Connected to {self.bluetooth.host}:{self.bluetooth.port}")
+            print(f"Connected to {self.bluetooth.host}:{self.bluetooth.port}")
             await self.inject_all_library_functions()
             print("Injected all library functions")
             await self.run_lua(f"is_awake=true;frame.time.utc({int(time.time())});frame.time.zone('{time.strftime('%z')[:3]}:{time.strftime('%z')[3:]}')", checked=True)

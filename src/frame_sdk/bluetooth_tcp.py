@@ -85,7 +85,6 @@ class BluetoothTCP:
             )
             self._connected = True
             self._last_activity_time = asyncio.get_event_loop().time()
-            print("Connected to {self.host}:{self.port}")
             asyncio.create_task(self._read_loop())
             if self._print_debugging:
                 print(f"Connected to {self.host}:{self.port}")
@@ -212,7 +211,7 @@ class BluetoothTCP:
                 
                 # Print raw data for debugging
                 if self._print_debugging:
-                    print(f"Raw data received: {' '.join([f'{b:02X}' for b in data])}")
+                    print(f"<< Raw data received: {' '.join([f'{b:02X}' for b in data])}")
                 
                 # Update activity timestamp on successful read
                 self._last_activity_time = asyncio.get_event_loop().time()
@@ -541,7 +540,7 @@ class BluetoothTCP:
         chunk_count = len(chunks)
         
         if self._print_debugging:
-            print(f"Sending {len(data)} bytes in {chunk_count} chunks")
+            print(f">> Sending {len(data)} bytes in {chunk_count} chunks")
             
         # Send each chunk with the LONG_DATA prefix
         for i, chunk in enumerate(chunks):
