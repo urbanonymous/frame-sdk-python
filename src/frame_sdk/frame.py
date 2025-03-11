@@ -16,13 +16,13 @@ class Frame:
     
     debug_on_new_connection: bool = False
 
-    def __init__(self, host: str = "localhost", port: int = 8011, 
+    def __init__(self, host: str = "localhost", port: int = 5555, 
                 keep_alive: bool = True, keep_alive_interval: float = 30.0):
         """Initialize the Frame device and its components.
         
         Args:
-            host (str): The host name or IP address of the Bluetooth-TCP bridge. Defaults to "localhost".
-            port (int): The port number of the Bluetooth-TCP bridge. Defaults to 8011.
+            host (str): The host name or IP address of the WebSocket server. Defaults to "localhost".
+            port (int): The port number of the WebSocket server. Defaults to 5555.
             keep_alive (bool): Whether to enable keep-alive functionality to maintain the connection.
             keep_alive_interval (float): The interval in seconds between keep-alive pings.
         """

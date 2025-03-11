@@ -1,5 +1,6 @@
-__all__ = ["bluetooth_tcp", "bluetooth_tcp", "files", "frame", "display", "camera"]
+__all__ = ["websocket", "bluetooth_tcp", "files", "frame", "display", "camera"]
 
+from .websocket import WebSocketBridge, FrameDataTypePrefixes
 from .bluetooth_tcp import BluetoothTCP
 from .files import Files
 from .frame import Frame
