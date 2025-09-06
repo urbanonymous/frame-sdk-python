@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 from typing import Awaitable, Callable, Optional
-from .bluetooth_tcp import BluetoothTCP, FrameDataTypePrefixes
+from .bluetooth_fake import Bluetooth, FrameDataTypePrefixes
 from .files import Files
 from .camera import Camera
 from .display import Display
@@ -26,7 +26,7 @@ class Frame:
             keep_alive (bool): Whether to enable keep-alive functionality to maintain the connection.
             keep_alive_interval (float): The interval in seconds between keep-alive pings.
         """
-        self.bluetooth = BluetoothTCP(host, port)
+        self.bluetooth = Bluetooth(host, port)
         self.files = Files(self)
         self.camera = Camera(self)
         self.display = Display(self)
